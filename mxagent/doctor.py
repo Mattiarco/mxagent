@@ -189,13 +189,20 @@ def warmup(timeout: float = 1800) -> Check:
     chisel = REPO / "chisel"
     if not which("sbt"):
         return Check("warm-up Chisel", False, "sbt assente", SETUP)
-    r = run(["sbt", "-batch", "runMain mxagent.Elaborate mxagent.Smoke build/Smoke"],
-            cwd=chisel, timeout=timeout)
+    cmd = "runMain mxagent.Elaborate mxagent.Smoke build/Smoke"
+    r = run(["sbt", "-batch", cmd], cwd=chisel, timeout=timeout)
     sv = chisel / "build" / "Smoke" / "Smoke.sv"
     if not r.ok or not sv.is_file():
+        lines = r.log.strip().splitlines()
+        # la prima riga d'errore significativa, non il riepilogo finale di sbt
+        errs = [ln for ln in lines if ("[error]" in ln or "Exception" in ln or "error:" in ln)
+                and "Total time" not in ln and "(Compile / " not in ln]
+        log = chisel / "build" / "warmup.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(r.log, encoding="utf-8")
         return Check("warm-up Chisel", False, f"elaborazione fallita in {r.seconds:.0f}s: "
-                     f"{r.log.strip().splitlines()[-1] if r.log.strip() else '?'}",
-                     "rilancia con rete disponibile; log completo: cd chisel && sbt run")
+                     f"{(errs or lines or ['?'])[0].strip()}",
+                     f"log completo in {log}; per rilanciare: cd chisel && sbt -batch '{cmd}'")
     head = sv.read_text(encoding="utf-8", errors="replace").splitlines()[0]
     want = f"firtool-{V.FIRTOOL_VERSION}"
     return Check("warm-up Chisel", want in head, f"{head.strip()} ({r.seconds:.0f}s)",
