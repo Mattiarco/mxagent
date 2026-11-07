@@ -1,0 +1,16 @@
+Extract a structured specification from this hardware request.
+
+REQUEST
+{spec}
+
+INTERFACE
+{interface}
+
+Return JSON with these fields:
+- operation: one of "decode", "multiply", "scale_convert", "quantize", "dot_product", "mac", "other"
+- element_format: e.g. "e2m1"; scale_format: e.g. "e8m0", "e4m3" or "none"
+- block_size: integer (1 if not a block operation)
+- output_format: e.g. "fp32", "fixed", "e2m1+e8m0"
+- accumulation: "exact" or "rounded" or "none"
+- latency_cycles: integer (0 = combinational)
+- corner_cases: list of short strings (the special cases the design must handle)

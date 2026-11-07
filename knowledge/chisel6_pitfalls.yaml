@@ -1,0 +1,360 @@
+# Errori tipici degli LLM con Chisel 6.6 (molti modelli scrivono API di Chisel 3).
+# Ogni voce:
+#   rule      riga breve inserita nel prompt del Coder (scheda "Chisel 6 rules")
+#   wrong     sorgente completo (classe Kb) che NON deve compilare/elaborare...
+#   right     ...e la versione corretta, che deve elaborare (verificato da
+#             tests/test_kb_integration.py con sbt + firtool veri)
+#   triggers  regex sui messaggi d'errore del verifier che richiamano la voce
+#   autofix   sostituzioni regex applicate al codice prima di sbt (solo se sicure)
+#   silent    true se l'errore NON produce errori di compilazione (bug funzionale)
+
+- id: width_literal
+  rule: "Widths need .W: UInt(8.W), SInt(5.W), 3.U(4.W). UInt(8) is Chisel 2/3 syntax and does not compile."
+  triggers: ['found\s*:\s*Int\(\d+\)\s*required\s*:\s*chisel3\.Width']
+  autofix:
+    - ['\b(UInt|SInt|Bits)\((\d+)\)', '\1(\2.W)']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val a = Input(UInt(4)) }) }
+  right: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val a = Input(UInt(4.W)) }) }
+
+- id: literal_width_apply
+  rule: "A literal with width is 5.U(8.W). Writing 5.U(8) silently extracts bit 8 of the literal."
+  silent: true
+  autofix:
+    - ['\b(\d+|"h[0-9A-Fa-f_]+"|"b[01_]+")\.(U|S)\((\d+)\)', '\1.\2(\3.W)']
+  right: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val y = Output(UInt(8.W)) }); io.y := 5.U(8.W) }
+
+- id: as_without_parens
+  rule: "Conversions have no parentheses in Chisel 6: x.asUInt, x.asSInt, x.asBool (not x.asUInt())."
+  triggers: ['does not take parameters', 'asUInt\(\)', 'asSInt\(\)']
+  autofix:
+    - ['\.(asUInt|asSInt|asBool|asClock)\(\)', '.\1']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(SInt(4.W)); val y = Output(UInt(4.W)) })
+      io.y := io.a.asUInt()
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(SInt(4.W)); val y = Output(UInt(4.W)) })
+      io.y := io.a.asUInt
+    }
+
+- id: to_bool
+  rule: "Use .asBool (toBool was removed)."
+  triggers: ['value toBool is not a member']
+  autofix:
+    - ['\.toBool\b(\(\))?', '.asBool']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(1.W)); val y = Output(Bool()) })
+      io.y := io.a.toBool
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(1.W)); val y = Output(Bool()) })
+      io.y := io.a.asBool
+    }
+
+- id: no_main_object
+  rule: "Do not write a main object, App, Driver or ChiselStage call: the tool flow elaborates the module itself."
+  triggers: ['object Driver is not a member', 'value execute is not a member', 'Driver']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val y = Output(Bool()) }); io.y := true.B }
+    object KbMain extends App { chisel3.Driver.execute(args, () => new Kb) }
+  right: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val y = Output(Bool()) }); io.y := true.B }
+
+- id: flat_io
+  rule: "Declare ports with FlatIO(new Bundle {...}) so Verilog port names are exactly the bundle field names (IO(...) adds an io_ prefix)."
+  triggers: ['has no attribute', 'AttributeError']
+  autofix:
+    - ['\bval\s+io\s*=\s*IO\(', 'val io = FlatIO(']
+  silent: true
+  right: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val a = Input(Bool()); val y = Output(Bool()) }); io.y := io.a }
+
+- id: seq_reduce_tree
+  rule: "reduceTree exists on Vec, not on Seq: VecInit(xs).reduceTree(_ +& _) (or a recursive pairwise reduction)."
+  triggers: ['value reduceTree is not a member of .*Seq']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(Vec(4, UInt(4.W))); val y = Output(UInt(6.W)) })
+      io.y := (0 until 4).map(i => io.a(i).pad(6)).reduceTree(_ +& _)
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(Vec(4, UInt(4.W))); val y = Output(UInt(6.W)) })
+      io.y := VecInit((0 until 4).map(i => io.a(i).pad(6))).reduceTree(_ +& _)
+    }
+
+- id: uint_sint_connect
+  rule: "UInt and SInt never mix implicitly: use .asSInt / .asUInt to reinterpret bits, .zext to make a UInt a positive SInt."
+  triggers: ['have different types', 'Sink \(SInt', 'Sink \(UInt', 'heterogeneous']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(4.W)); val y = Output(SInt(5.W)) })
+      io.y := io.a
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(4.W)); val y = Output(SInt(5.W)) })
+      io.y := io.a.zext
+    }
+
+- id: mux_mixed_types
+  rule: "Both branches of Mux must have the same type (both UInt or both SInt)."
+  triggers: ['Mux', 'heterogeneous', 'different types']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val c = Input(Bool()); val a = Input(UInt(4.W)); val b = Input(SInt(4.W)); val y = Output(SInt(5.W)) })
+      io.y := Mux(io.c, io.a, io.b)
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val c = Input(Bool()); val a = Input(UInt(4.W)); val b = Input(SInt(4.W)); val y = Output(SInt(5.W)) })
+      io.y := Mux(io.c, io.a.zext, io.b)
+    }
+
+- id: scala_if_on_hardware
+  rule: "Scala if/else and == cannot test hardware values: use when/.elsewhen/.otherwise or Mux, and === / =/= for comparisons."
+  triggers: ['found\s*:\s*chisel3\.Bool\s*required\s*:\s*Boolean']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(Bool()); val y = Output(UInt(2.W)) })
+      if (io.a) { io.y := 1.U } else { io.y := 2.U }
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(Bool()); val y = Output(UInt(2.W)) })
+      io.y := Mux(io.a, 1.U, 2.U)
+    }
+
+- id: clock_in_rawmodule
+  rule: "RawModule has no implicit clock: registers or Module(...) children with a clock need a Module parent or withClockAndReset. Purely combinational submodules should extend RawModule."
+  triggers: ['No implicit clock', 'implicit clock', 'No implicit reset']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(4.W)); val y = Output(UInt(4.W)) })
+      io.y := RegNext(io.a)
+    }
+  right: |
+    import chisel3._
+    class Kb extends Module {
+      val io = FlatIO(new Bundle { val a = Input(UInt(4.W)); val y = Output(UInt(4.W)) })
+      io.y := RegNext(io.a)
+    }
+
+- id: not_initialized
+  rule: "Every output and Wire must be driven on all paths: give a default before when blocks (or use WireDefault)."
+  triggers: ['not fully initialized', 'is not fully initialized', 'sink .* not initialized']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val c = Input(Bool()); val y = Output(UInt(2.W)) })
+      when(io.c) { io.y := 1.U }
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val c = Input(Bool()); val y = Output(UInt(2.W)) })
+      io.y := 0.U
+      when(io.c) { io.y := 1.U }
+    }
+
+- id: vec_literal
+  rule: "Build a hardware vector of values with VecInit(Seq(...)), not Vec(Seq(...)) or Vec(n, value)."
+  triggers: ['overloaded method apply', 'Vec\.apply', 'chisel3\.Vec']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val i = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := Vec(Seq(1.U, 2.U, 3.U, 4.U))(io.i)
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val i = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := VecInit(Seq(1.U(4.W), 2.U, 3.U, 4.U))(io.i)
+    }
+
+- id: add_carry
+  rule: "a + b keeps the width of the wider operand (the carry is dropped): use +& (and -&) when the result must not overflow."
+  silent: true
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(4.W)); val b = Input(UInt(4.W)); val y = Output(UInt(5.W)) })
+      io.y := io.a +& io.b
+    }
+
+- id: cat_order
+  rule: "Cat(x, y) puts x in the MOST significant bits. To pack element 0 into the LSBs use Cat(xs.reverse) or VecInit(xs).asUInt."
+  silent: true
+  right: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val y = Output(UInt(8.W)) })
+      val xs = Seq(1.U(4.W), 2.U(4.W))
+      io.y := Cat(xs.reverse)
+    }
+
+- id: bit_extract_unsigned
+  rule: "Bit extraction x(hi, lo) always returns UInt, also on SInt: reinterpret with .asSInt when a signed field is needed."
+  silent: true
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(8.W)); val y = Output(SInt(4.W)) })
+      io.y := io.a(3, 0).asSInt
+    }
+
+- id: fixedpoint_removed
+  rule: "chisel3.experimental.FixedPoint does not exist in Chisel 6: use SInt/UInt with an explicit binary point."
+  triggers: ['FixedPoint is not a member', 'not found: (type|object) FixedPoint']
+  wrong: |
+    import chisel3._
+    import chisel3.experimental.FixedPoint
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val y = Output(FixedPoint(8.W, 4.BP)) }) }
+  right: |
+    import chisel3._
+    class Kb extends RawModule { val io = FlatIO(new Bundle { val y = Output(SInt(8.W)) }); io.y := 0.S }
+
+- id: dynamic_shift_width
+  rule: "x << n with a UInt shift amount widens the result by 2^width(n)-1 bits: slice the result (e.g. (x << n)(23, 0)) to the width you need."
+  silent: true
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val x = Input(UInt(8.W)); val n = Input(UInt(4.W)); val y = Output(UInt(8.W)) })
+      io.y := (io.x << io.n)(7, 0)
+    }
+
+- id: log2_util
+  rule: "Leading-one position: chisel3.util.Log2(x) (floor log2) or PriorityEncoder(Reverse(x)); import chisel3.util._ for Cat, Mux1H, MuxCase, Fill, Reverse, PriorityEncoder, log2Ceil."
+  triggers: ['not found: value (Cat|Log2|MuxCase|MuxLookup|Fill|Reverse|PriorityEncoder|Mux1H|log2Ceil|log2Up|PopCount)']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(8.W)); val y = Output(UInt(3.W)) })
+      io.y := Log2(io.a)
+    }
+  right: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(8.W)); val y = Output(UInt(3.W)) })
+      io.y := Log2(io.a)
+    }
+
+- id: scala_match_on_hardware
+  rule: "Scala `match` cannot select on hardware values (case 0.U => does not parse): use Mux, MuxCase, MuxLookup or a VecInit lookup table indexed by the signal."
+  triggers: ['=>.\s*expected but']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := (io.a match { case 0.U => 1.U; case _ => 2.U })
+    }
+  right: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := VecInit(Seq(1.U(4.W), 2.U, 2.U, 2.U))(io.a)
+    }
+
+- id: muxlookup_curried
+  rule: "In Chisel 6 MuxLookup is curried: MuxLookup(key, default)(Seq(k1 -> v1, ...))."
+  triggers: ['MuxLookup', 'too many arguments']
+  wrong: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := MuxLookup(io.a, 2.U, Seq(0.U -> 1.U))
+    }
+  right: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val a = Input(UInt(2.W)); val y = Output(UInt(4.W)) })
+      io.y := MuxLookup(io.a, 2.U(4.W))(Seq(0.U -> 1.U(4.W)))
+    }
+
+- id: fractional_literal
+  rule: "Hardware has no fractional literals (0.5.S, 1.5.U do not exist): work in scaled integer units (e.g. value*2 or value*4) as the interface specifies."
+  triggers: ['value [SUF] is not a member of Double', 'is not a member of Double']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val y = Output(SInt(5.W)) })
+      io.y := 0.5.S
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val y = Output(SInt(5.W)) })
+      io.y := 1.S(5.W) // 0.5 in units of 1/2
+    }
+
+- id: negative_uint_literal
+  rule: "UInt literals cannot be negative ((-1).U fails at elaboration): use SInt literals (-1.S) or two's complement constants."
+  triggers: ['UInt literal -?\d+ is negative', 'is negative']
+  wrong: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val y = Output(UInt(4.W)) })
+      val k = -1
+      io.y := k.U
+    }
+  right: |
+    import chisel3._
+    class Kb extends RawModule {
+      val io = FlatIO(new Bundle { val y = Output(SInt(4.W)) })
+      val k = -1
+      io.y := k.S(4.W)
+    }
+
+- id: regnext_unknown_width
+  rule: "RegNext(x) leaves the register width to inference: utilities that need the width at elaboration (Log2, PriorityEncoder, .getWidth, slicing) fail on it. Declare the register type: val r = Reg(UInt(13.W)); r := x (or Reg(chiselTypeOf(x)))."
+  triggers: ['Width of .* is unknown', 'is unknown!']
+  wrong: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends Module {
+      val io = FlatIO(new Bundle { val a = Input(UInt(8.W)); val y = Output(UInt(3.W)) })
+      val r = RegNext(io.a)
+      io.y := Log2(r)
+    }
+  right: |
+    import chisel3._
+    import chisel3.util._
+    class Kb extends Module {
+      val io = FlatIO(new Bundle { val a = Input(UInt(8.W)); val y = Output(UInt(3.W)) })
+      val r = Reg(UInt(8.W))
+      r := io.a
+      io.y := Log2(r)
+    }

@@ -1,0 +1,33 @@
+[info] welcome to sbt 1.10.1 (Eclipse Adoptium Java 17.0.21)
+[info] loading project definition from /home/mattia/mxwork/b01_e2m1_decode/sbt/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxagent-hw (in build file:/home/mattia/mxwork/b01_e2m1_decode/sbt/)
+[info] compiling 2 Scala sources to /home/mattia/mxwork/b01_e2m1_decode/sbt/target/scala-2.13/classes ...
+[info] done compiling
+[info] running mxagent.Elaborate cand_b01_comb_loop.E2M1Decode ../b01_comb_loop/verilog
+[error] circt.stage.phases.Exceptions$FirtoolNonZeroExitCode: /home/mattia/.cache/llvm-firtool/1.62.1/bin/firtool returned a non-zero exit code. Note that this version of Chisel (6.6.0) was published against firtool version 1.62.1.
+[error] ------------------------------------------------------------------------------
+[error] ExitCode:
+[error] 1
+[error] STDOUT:
+[error] 
+[error] STDERR:
+[error] src/main/scala/cand_b01_comb_loop/b01_comb_loop.scala:7:7: error: detected combinational cycle in a FIRRTL module, sample path: E2M1Decode.{t <- _t_T_1 <- ... <- _t_T <- ... <- t}
+[error] class E2M1Decode extends RawModule {
+[error]       ^
+[error] 
+[error] ------------------------------------------------------------------------------
+[error] stack trace is suppressed; run 'last Compile / runMain' for the full output
+[error] (Compile / runMain) circt.stage.phases.Exceptions$FirtoolNonZeroExitCode: /home/mattia/.cache/llvm-firtool/1.62.1/bin/firtool returned a non-zero exit code. Note that this version of Chisel (6.6.0) was published against firtool version 1.62.1.
+[error] ------------------------------------------------------------------------------
+[error] ExitCode:
+[error] 1
+[error] STDOUT:
+[error] 
+[error] STDERR:
+[error] src/main/scala/cand_b01_comb_loop/b01_comb_loop.scala:7:7: error: detected combinational cycle in a FIRRTL module, sample path: E2M1Decode.{t <- _t_T_1 <- ... <- _t_T <- ... <- t}
+[error] class E2M1Decode extends RawModule {
+[error]       ^
+[error] 
+[error] ------------------------------------------------------------------------------
+[error] Total time: 4 s, completed Nov 7, 2026, 12:44:54 AM

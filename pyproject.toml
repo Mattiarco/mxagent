@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mxagent"
+version = "0.1.0"
+description = "Local (Ollama) agentic pipeline generating bit-exact MXFP4/NVFP4 arithmetic units in Chisel 6"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+sim = ["cocotb>=1.9,<3"]
+eval = ["matplotlib>=3.7"]
+dev = ["pytest>=8", "ml_dtypes>=0.4"]
+
+[project.scripts]
+mxagent = "mxagent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mxagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

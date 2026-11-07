@@ -1,0 +1,16 @@
+name: b08_mxfp4_mac
+title: MAC MXFP4 (acc + dot di due blocchi, un solo arrotondamento) con wrapper CV-X-IF
+difficulty: 8
+top: MXFP4Mac
+timing: {kind: comb}
+wrapper: cvxif
+ports:
+  - {name: acc, dir: in, type: fp32, doc: "accumulator input (binary32)"}
+  - {name: a_scale, dir: in, type: e8m0, doc: "shared scale of block A"}
+  - {name: a, dir: in, type: e2m1, elems: 32, doc: "elements of block A"}
+  - {name: b_scale, dir: in, type: e8m0, doc: "shared scale of block B"}
+  - {name: b, dir: in, type: e2m1, elems: 32, doc: "elements of block B"}
+  - {name: y, dir: out, type: fp32, doc: "acc + Dot(A, B), rounded once to binary32"}
+golden: mx_mac
+numerics: {accumulation: exact, out_rounding: rne, out_subnormals: keep, out_overflow: inf}
+vectors: {exhaustive: false, corner: true, random: 5000}

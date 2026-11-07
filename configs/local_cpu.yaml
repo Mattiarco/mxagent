@@ -1,0 +1,37 @@
+# Sviluppo su CPU (WSL, nessuna GPU): modelli piccoli, budget più largo in tempo.
+llm:
+  host: null
+  seed: 0
+  timeout_s: 1800
+  max_retries: 1
+  cache_dir: .cache/llm
+  roles:
+    planner:   {model: "qwen2.5-coder:14b", temperature: 0.2, num_ctx: 8192, num_predict: 1024}
+    coder:     {model: "qwen2.5-coder:7b",  temperature: 0.4, num_ctx: 8192, num_predict: 2048}
+    fixer:     {model: "qwen2.5-coder:7b",  temperature: 0.2, num_ctx: 8192, num_predict: 2048}
+    reflector: {model: "qwen2.5-coder:14b", temperature: 0.2, num_ctx: 8192, num_predict: 2048}
+    escalate:  {model: "qwen2.5-coder:14b", temperature: 0.3, num_ctx: 8192, num_predict: 2048}
+    optimizer: {model: "qwen2.5-coder:14b", temperature: 0.3, num_ctx: 8192, num_predict: 2048}
+    embed:     {model: "nomic-embed-text",  temperature: 0.0, num_ctx: 2048}
+
+agent:
+  best_of_n: 2
+  max_block_iters: 3
+
+budget:
+  max_llm_calls: 30
+  max_tokens: 300000
+  max_wall_s: 5400
+  best_of_n: 2
+  max_fix_iters: 6
+
+sim:
+  sbt_mode: client
+  random_vectors: 2000
+
+library:
+  path: library
+
+synth:
+  backends: [generic, ecp5, nextpnr]   # xc7 su b04/b05 richiede ~2 min per design
+  optimize_iters: 2

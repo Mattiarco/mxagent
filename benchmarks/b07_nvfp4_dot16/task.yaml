@@ -1,0 +1,14 @@
+name: b07_nvfp4_dot16
+title: Dot product di due blocchi NVFP4 (16 elementi, scala E4M3) -> FP32
+difficulty: 6
+top: NVFP4Dot16
+timing: {kind: comb}
+ports:
+  - {name: a_scale, dir: in, type: e4m3, doc: "block scale of A (FP8 E4M3)"}
+  - {name: a, dir: in, type: e2m1, elems: 16, doc: "elements of block A"}
+  - {name: b_scale, dir: in, type: e4m3, doc: "block scale of B (FP8 E4M3)"}
+  - {name: b, dir: in, type: e2m1, elems: 16, doc: "elements of block B"}
+  - {name: y, dir: out, type: fp32, doc: "a_scale * b_scale * sum_i A_i*B_i as binary32"}
+golden: nvfp4_dot
+numerics: {accumulation: exact, out_rounding: rne, out_subnormals: keep, out_overflow: inf}
+vectors: {exhaustive: false, corner: true, random: 4000}

@@ -1,0 +1,81 @@
+# Configurazione di default di mxagent.
+# I nomi dei modelli sono solo qui: si cambiano senza toccare il codice.
+llm:
+  host: null            # null = $OLLAMA_HOST o http://localhost:11434
+  seed: 0
+  timeout_s: 600
+  max_retries: 2
+  cache_dir: .cache/llm
+  roles:
+    planner:   {model: "qwen2.5-coder:32b", temperature: 0.2, num_ctx: 16384}
+    coder:     {model: "qwen2.5-coder:14b", temperature: 0.4, num_ctx: 16384}
+    fixer:     {model: "qwen2.5-coder:14b", temperature: 0.2, num_ctx: 16384}   # errori di sintassi
+    reflector: {model: "qwen2.5-coder:32b", temperature: 0.2, num_ctx: 16384}   # bug funzionali
+    escalate:  {model: "qwen2.5-coder:32b", temperature: 0.3, num_ctx: 16384}   # anti-loop
+    optimizer: {model: "qwen2.5-coder:32b", temperature: 0.3, num_ctx: 16384}   # PPA (M5)
+    embed:     {model: "nomic-embed-text", temperature: 0.0, num_ctx: 8192}     # RAG
+
+# Meccanismi del sistema completo (ognuno si spegne per le ablation di M6)
+agent:
+  decompose: true
+  spec_parser: true
+  kb: true
+  format_card: true
+  structured_feedback: true
+  library: true
+  best_of_n: 3
+  escape: true
+  routing: true
+  memory_items: 4
+  escape_after_repeats: 2
+  escape_after_stall: 3
+  max_block_iters: 4
+  ppa: true             # PPA Optimizer dopo il pass (metriche funzionali invariate)
+
+library:
+  path: library
+  reuse_exact: true
+  examples: 2
+  exclude_current_task: true
+
+budget:
+  max_llm_calls: 60
+  max_tokens: 400000
+  max_wall_s: 1800
+  best_of_n: 3
+  max_fix_iters: 6
+
+sim:
+  simulator: verilator
+  sbt_mode: client      # server sbt persistente: compilazione ~1 s a caldo (batch: ~7 s)
+  max_examples: 3
+  ddmin_rounds: 8
+  random_vectors: 2000
+  seed: 0
+  timeout_s: 900
+
+synth:
+  # generic (porte CMOS, sempre disponibile con Yosys) | liberty (serve un .lib) | ecp5 | xc7
+  # | nextpnr (Fmax su ECP5) | opensta (serve sta + .lib) | vivado (se nel PATH)
+  backends: [generic, ecp5, xc7, nextpnr]
+  primary: generic      # metrica del PPA Optimizer (veloce, indipendente dalla tecnologia)
+  liberty: null         # file .lib per liberty/opensta (es. Nangate45, sky130)
+  fpga_part: xc7a100tcsg324-1
+  ecp5_device: 85k
+  ecp5_package: CABGA381
+  clock_ns: 10.0
+  pnr_seeds: [1, 2, 3]
+  timeout_s: 1800
+  objective: adp        # area | delay | adp
+  optimize_iters: 4
+  min_gain: 0.01
+  tolerance: 0.02
+
+# Semantica numerica (vedi mxagent/formats/numerics.py); i task possono sovrascriverla.
+numerics:
+  accumulation: exact
+  out_rounding: rne
+  out_subnormals: keep
+  out_overflow: inf
+
+runs_dir: runs

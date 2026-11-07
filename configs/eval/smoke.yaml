@@ -1,0 +1,17 @@
+# Prova dell'harness su CPU (WSL): un task, un seed, modelli piccoli.
+name: smoke
+config: configs/local_cpu.yaml
+tasks: [b01_e2m1_decode]
+modes: [baseline-a, baseline-b, full]
+seeds: 1
+models:
+  cpu:
+    roles: {coder: "qwen2.5-coder:7b", fixer: "qwen2.5-coder:7b", planner: "qwen2.5-coder:14b",
+            reflector: "qwen2.5-coder:14b", escalate: "qwen2.5-coder:14b",
+            optimizer: "qwen2.5-coder:14b"}
+    baseline: "qwen2.5-coder:7b"
+ablations:
+  variants:
+    no_kb: {agent.kb: false}
+library: {policy: fresh}
+ppa_backends: [generic]

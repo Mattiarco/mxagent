@@ -1,0 +1,11 @@
+name: b02_e2m1_mul
+title: Moltiplicatore E2M1 x E2M1 esatto
+difficulty: 2
+top: E2M1Mul
+timing: {kind: comb}
+ports:
+  - {name: a, dir: in, type: e2m1}
+  - {name: b, dir: in, type: e2m1}
+  - {name: p, dir: out, type: sint, width: 9, frac_bits: 2, doc: "exact product a*b; p = a*b*4"}
+golden: e2m1_mul
+vectors: {exhaustive: true, corner: false}

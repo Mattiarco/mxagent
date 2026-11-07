@@ -1,0 +1,9 @@
+
+5. Executing LTP pass (find longest path).
+
+Longest topological path in E8M0ToFP32 (length=5):
+    0: \x [7]
+    1: $abc$42$new_n21 (via $abc$42$blif$42$11)
+    2: $abc$42$new_n22 (via $abc$42$blif$42$12)
+    3: $abc$42$new_n23 (via $abc$42$blif$42$13)
+    4: $abc$42$new_n24 (via $abc$42$blif$42$14)

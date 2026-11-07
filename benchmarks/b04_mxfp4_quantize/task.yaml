@@ -1,0 +1,13 @@
+name: b04_mxfp4_quantize
+title: Quantizzatore FP32 -> blocco MXFP4 (scala + RNE)
+difficulty: 4
+top: MXFP4Quantize
+timing: {kind: comb}
+ports:
+  - {name: x, dir: in, type: fp32, elems: 32, doc: "32 binary32 values"}
+  - {name: scale, dir: out, type: e8m0, doc: "shared scale X"}
+  - {name: q, dir: out, type: e2m1, elems: 32, doc: "quantized elements"}
+golden: mx_quantize
+numerics: {quant_rounding: rne, quant_scale_overflow: nan, quant_scale_underflow: clamp,
+           quant_zero_block: min, quant_special_input: nan_scale, in_subnormals: keep}
+vectors: {exhaustive: false, corner: true, random: 3000}

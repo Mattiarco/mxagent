@@ -1,0 +1,37 @@
+# Campagna principale della tesi (server con GPU, es. DGX Spark).
+#   mxagent eval --campaign configs/eval/main.yaml --dry-run    # elenco dei job
+#   mxagent eval --campaign configs/eval/main.yaml              # esegue/riprende
+#   mxagent report --dir evals/main                             # report anche parziale
+name: main
+config: configs/default.yaml       # budget identico per tutte le modalità
+tasks: [b01_e2m1_decode, b02_e2m1_mul, b03_e8m0_to_fp32, b04_mxfp4_quantize, b05_mxfp4_dot32,
+        b06_mxfp4_dot32_pipe, b07_nvfp4_dot16, b08_mxfp4_mac]
+modes: [baseline-a, baseline-b, full]
+seeds: 10
+seed_start: 0
+
+# Due modelli. Con `all` ogni ruolo usa lo stesso modello: baseline e sistema
+# completo sono confrontati a parità di modello (il routing piccolo/grande è
+# quindi spento in questa campagna; vedi docs/eval.md).
+models:
+  qwen14b: {all: "qwen2.5-coder:14b"}
+  qwen32b: {all: "qwen2.5-coder:32b"}
+
+# Ablation su un sottoinsieme di task: ogni variante spegne un meccanismo del
+# sistema completo ed è appaiata (stessi task e seed) con `full`.
+ablations:
+  tasks: [b02_e2m1_mul, b03_e8m0_to_fp32, b05_mxfp4_dot32]
+  models: [qwen32b]
+  variants:
+    no_decompose:  {agent.decompose: false}
+    no_spec:       {agent.spec_parser: false}
+    no_kb:         {agent.kb: false}
+    no_card:       {agent.format_card: false}
+    raw_feedback:  {agent.structured_feedback: false}
+    no_library:    {agent.library: false}
+    best_of_1:     {agent.best_of_n: 1}
+    no_escape:     {agent.escape: false}
+    no_memory:     {agent.memory_items: 0}
+
+library: {policy: fresh}           # niente leakage e niente dipendenza dall'ordine
+ppa_backends: [generic]            # sintesi di ogni design passato, di ogni modalità

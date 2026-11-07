@@ -1,0 +1,14 @@
+name: b06_mxfp4_dot32_pipe
+title: Dot product MXFP4 (32 elementi) -> FP32, in pipeline con target di frequenza
+difficulty: 6
+top: MXFP4Dot32Pipe
+timing: {kind: pipe, latency: 3, target_mhz: 30}
+ports:
+  - {name: a_scale, dir: in, type: e8m0, doc: "shared scale of block A"}
+  - {name: a, dir: in, type: e2m1, elems: 32, doc: "elements of block A"}
+  - {name: b_scale, dir: in, type: e8m0, doc: "shared scale of block B"}
+  - {name: b, dir: in, type: e2m1, elems: 32, doc: "elements of block B"}
+  - {name: y, dir: out, type: fp32, doc: "dot product rounded once to binary32"}
+golden: mx_dot
+numerics: {accumulation: exact, out_rounding: rne, out_subnormals: keep, out_overflow: inf}
+vectors: {exhaustive: false, corner: true, random: 4000}

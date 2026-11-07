@@ -1,0 +1,11 @@
+name: b03_e8m0_to_fp32
+title: Scala E8M0 -> FP32 (NaN incluso)
+difficulty: 2
+top: E8M0ToFP32
+timing: {kind: comb}
+ports:
+  - {name: x, dir: in, type: e8m0}
+  - {name: y, dir: out, type: fp32, doc: "2^(x-127) as IEEE binary32; NaN -> 0x7FC00000"}
+golden: e8m0_to_fp32
+numerics: {out_subnormals: keep}
+vectors: {exhaustive: true, corner: false}

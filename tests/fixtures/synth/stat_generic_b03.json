@@ -1,0 +1,44 @@
+{
+   "creator": "Yosys 0.70+344 (git sha1 2f2307ad6, Release, Clang /usr/bin/clang++ 21.1.8)",
+   "invocation": "stat -json -tech cmos ",
+   "modules": {
+      "\\E8M0ToFP32": {
+         "num_wires":         17,
+         "num_wire_bits":     55,
+         "num_pub_wires":     2,
+         "num_pub_wire_bits": 40,
+         "num_ports":         2,
+         "num_port_bits":     40,
+         "num_memories":      0,
+         "num_memory_bits":   0,
+         "num_processes":     0,
+         "num_cells":         16,
+         "num_submodules":       0,
+         "num_cells_by_type": {
+            "$_NAND_": 8,
+            "$_NOR_": 7,
+            "$_NOT_": 1
+         },
+         "estimated_num_transistors": "62"
+      }
+   },
+      "design": {
+         "num_wires":         17,
+         "num_wire_bits":     55,
+         "num_pub_wires":     2,
+         "num_pub_wire_bits": 40,
+         "num_ports":         2,
+         "num_port_bits":     40,
+         "num_memories":      0,
+         "num_memory_bits":   0,
+         "num_processes":     0,
+         "num_cells":         16,
+         "num_submodules":       0,
+         "num_cells_by_type": {
+            "$_NAND_": 8,
+            "$_NOR_": 7,
+            "$_NOT_": 1
+         },
+         "estimated_num_transistors": "62"
+      }
+}

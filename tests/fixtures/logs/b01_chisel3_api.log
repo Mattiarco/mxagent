@@ -1,0 +1,13 @@
+[info] welcome to sbt 1.10.1 (Eclipse Adoptium Java 17.0.21)
+[info] loading project definition from /home/mattia/mxwork/b01_e2m1_decode/sbt/project
+[info] loading settings for project root from build.sbt ...
+[info] set current project to mxagent-hw (in build file:/home/mattia/mxwork/b01_e2m1_decode/sbt/)
+[info] compiling 2 Scala sources to /home/mattia/mxwork/b01_e2m1_decode/sbt/target/scala-2.13/classes ...
+[error] /home/mattia/mxwork/b01_e2m1_decode/sbt/src/main/scala/cand_b01_chisel3_api/b01_chisel3_api.scala:9:24: type mismatch;
+[error]  found   : Int(4)
+[error]  required: chisel3.Width
+[error]     val a = Input(UInt(4))
+[error]                        ^
+[error] one error found
+[error] (Compile / compileIncremental) Compilation failed
+[error] Total time: 2 s, completed Nov 7, 2026, 12:44:40 AM

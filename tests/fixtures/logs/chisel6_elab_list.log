@@ -1,0 +1,8 @@
+[info] running mxagent.Elaborate cand_AdderTree_01.AdderTree /work/out
+[error] src/main/scala/cand_AdderTree_01/AdderTree.scala 33:68: Invalid bit range [hi=0, lo=8]
+[error]   val decodedValues = VecInit(Seq.tabulate(32)(i => e2m1Decode(io.x(i * 9, (i + 1) * 9 - 1))))
+[error]                                                                    ^
+[error] There were 1 error(s) during hardware elaboration.
+[error] chisel3.internal.Errors: Fatal errors during hardware elaboration. Look above for error list. Rerun with --throw-on-first-error if you wish to see a stack trace.
+[error] stack trace is suppressed; run 'last Compile / runMain' for the full output
+[error] Total time: 1 s, completed Nov 7, 2026, 3:16:38 AM

@@ -1,0 +1,11 @@
+name: b01_e2m1_decode
+title: Decoder E2M1 -> virgola fissa
+difficulty: 1
+top: E2M1Decode
+timing: {kind: comb}
+ports:
+  - {name: a, dir: in, type: e2m1, doc: "one FP4 E2M1 element"}
+  - {name: y, dir: out, type: sint, width: 5, frac_bits: 1, doc: "exact value of a; y = value * 2"}
+golden: e2m1_decode
+params: {frac_bits: 1, out_width: 5}
+vectors: {exhaustive: true, corner: false}
