@@ -345,6 +345,14 @@ if [[ ! -x "${UV}" ]]; then
     | tar -xz -C "${BIN}" --strip-components=1
 fi
 export UV_PYTHON_INSTALL_DIR="${PREFIX}/python"
+# Solo Python gestito da uv: quello di sistema di solito non ha gli header
+# (python3.X-dev), e su aarch64 cocotb non ha wheel e va compilato (Python.h).
+export UV_PYTHON_PREFERENCE=only-managed
+if [[ -x "${PREFIX}/venv/bin/python" ]] \
+   && ! "${PREFIX}/venv/bin/python" -c 'import sys; sys.exit(not sys.base_prefix.startswith(sys.argv[1]))' "${UV_PYTHON_INSTALL_DIR}"; then
+  log "venv esistente basato su Python di sistema: lo ricreo con Python gestito da uv"
+  rm -rf "${PREFIX}/venv"
+fi
 if [[ ! -x "${PREFIX}/venv/bin/python" ]]; then
   log "venv Python ${PYTHON_VERSION} in ${PREFIX}/venv"
   "${UV}" venv -q --python "${PYTHON_VERSION}" "${PREFIX}/venv"
