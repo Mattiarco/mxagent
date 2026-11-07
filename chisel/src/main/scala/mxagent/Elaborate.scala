@@ -20,7 +20,11 @@ class Smoke extends Module {
 object Elaborate {
   // niente -strip-debug-info: i locatori `// @[File.scala l:c]` nel Verilog
   // permettono di riportare i warning di lint al sorgente Scala
-  val firtoolOpts = Array("-disable-all-randomization")
+  // --mlir-disable-threading: niente thread pool di MLIR (un thread per core).
+  // Con limiti su processi/thread (ulimit -u, cgroup pids) e job in parallelo,
+  // la creazione dei thread fallisce con EAGAIN e firtool abortisce (exit 134)
+  // dopo aver già scritto il Verilog. I moduli sono piccoli: il costo è nullo.
+  val firtoolOpts = Array("-disable-all-randomization", "--mlir-disable-threading")
 
   def main(args: Array[String]): Unit = {
     val cls = args.lift(0).getOrElse("mxagent.Smoke")
