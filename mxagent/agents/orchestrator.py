@@ -35,7 +35,7 @@ from ..verify import chisel
 from ..verify.verifier import Verifier
 from . import prompts
 from .ppa import PPAOptimizer
-from .schemas import PLAN_SCHEMA, SPEC_SCHEMA, Plan, validate_plan
+from .schemas import PLAN_SCHEMA, SPEC_SCHEMA, Plan, reconcile_spec, validate_plan
 from .solver import AgentContext, ModuleSolver, SolveResult
 
 PROMPTS = ["full/system", "full/coder", "full/reflect", "full/spec", "full/planner", "full/integrate",
@@ -97,8 +97,11 @@ class Orchestrator:
         r = self.ctx.chat("planner", "You extract structured hardware specifications as JSON.",
                           user, seed=self.seed, fmt=SPEC_SCHEMA, tag="spec")
         data = r.data if isinstance(r.data, dict) else (parse_json(r.text) or {})
-        self.rec.write_json("spec.json", data)
-        return data
+        spec, mism = reconcile_spec(data, self.task)
+        if mism:  # vale l'interfaccia del benchmark; le differenze restano nel trace
+            self.rec.event("spec_mismatch", mismatches=mism, used="benchmark")
+        self.rec.write_json("spec.json", spec)
+        return spec
 
     def plan(self, structured: dict) -> Plan:
         if not self.cfg.agent.decompose:
