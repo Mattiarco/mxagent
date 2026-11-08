@@ -31,12 +31,13 @@ class SimRun:
 
 class Simulator:
     def __init__(self, task: Task, sv_files: list[Path], build_dir: Path, timeout: float = 900,
-                 simulator: str = "verilator"):
+                 simulator: str = "verilator", seed: int = 0):
         self.task = task
         self.sv_files = sv_files
         self.build_dir = build_dir
         self.timeout = timeout
         self.simulator = simulator
+        self.seed = seed  # seed di cocotb: i vettori vengono dal JSON, ma la run resta riproducibile
         self.built = False
         self.build_seconds = 0.0
         self._n = 0
@@ -69,11 +70,17 @@ class Simulator:
             "kind": t.timing.kind, "latency": t.timing.latency,
             "inputs": [p.name for p in t.inputs], "outputs": [p.name for p in t.outputs],
             "vectors": vectors}), encoding="utf-8")
-        ok, log, sec = self._call("test", ["--vectors", str(vec_file), "--results", str(res_file)])
+        ok, log, sec = self._call("test", ["--vectors", str(vec_file), "--results", str(res_file),
+                                           "--env", *seed_env(self.seed)])
         if not res_file.is_file():
             return SimRun(False, [], "la simulazione non ha prodotto risultati (crash?)", sec, log)
         outs = json.loads(res_file.read_text(encoding="utf-8"))["outputs"]
         return SimRun(True, outs, "", sec, log)
+
+
+def seed_env(seed: int) -> list[str]:
+    """Seed di cocotb (COCOTB_RANDOM_SEED in cocotb 2.x, RANDOM_SEED in 1.9)."""
+    return [f"COCOTB_RANDOM_SEED={seed}", f"RANDOM_SEED={seed}"]
 
 
 def runner_available() -> str | None:

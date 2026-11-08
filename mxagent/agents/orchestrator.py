@@ -27,6 +27,7 @@ from ..rag.embed import Embedder
 from ..rag.library import Component, Library
 from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
+from ..run.cleanup import clean_run
 from ..run.result import RunInterrupted, interruptible, llm_by_role, ppa_attempts, write_result
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
@@ -327,7 +328,16 @@ class Orchestrator:
                 self._state("FAILED", reason="exception", error=self._outcome["error"])
                 raise
             finally:
+                self._cleanup()
                 self._write_result(t0)
+
+    def _cleanup(self) -> None:
+        if self.cfg.runs.keep_build_artifacts:
+            return
+        try:
+            self.rec.event("cleanup", **clean_run(self.rec.root))
+        except Exception as e:  # noqa: BLE001 - la pulizia non deve mai far fallire la run
+            self.rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
 
     def _run(self, t0: float) -> RunResult:
         cfg = self.cfg

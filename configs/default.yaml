@@ -79,3 +79,5 @@ numerics:
   out_overflow: inf
 
 runs_dir: runs
+runs:
+  keep_build_artifacts: false   # true: tiene sbt/target e gli oggetti di Verilator (~40 MB/run)

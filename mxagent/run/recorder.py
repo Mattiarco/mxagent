@@ -8,6 +8,9 @@
                     selection.json (run superate; altrimenti solo il miglior tentativo)
     metrics.json    metriche della run (dai tool, mai stimate); solo se la run arriva in fondo
     result.json     esito SEMPRE presente: done | failed | interrupted (vedi run/result.py)
+
+A fine run gli artefatti di build (sbt/target, oggetti di Verilator) si cancellano,
+salvo ``runs.keep_build_artifacts: true`` (vedi run/cleanup.py).
 """
 from __future__ import annotations
 

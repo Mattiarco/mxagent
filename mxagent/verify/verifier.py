@@ -150,7 +150,7 @@ class Verifier:
 
         # 3. simulazione
         rep.stage = "sim"
-        sv = Simulator(self.task, el.verilog, job / "sim", timeout=self.sim_timeout)
+        sv = Simulator(self.task, el.verilog, job / "sim", timeout=self.sim_timeout, seed=self.seed)
         suites_vecs = self.vectors()
         suites = [s for s, _ in suites_vecs]
         vecs = [v for _, v in suites_vecs]

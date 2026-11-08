@@ -136,6 +136,13 @@ class LibraryConfig(_Strict):
     readonly: bool = False  # libreria congelata (valutazione): niente aggiunte durante la run
 
 
+class RunsConfig(_Strict):
+    """Cartelle delle run."""
+
+    #: False: a fine run si cancellano sbt/target e gli oggetti di Verilator (run/cleanup.py)
+    keep_build_artifacts: bool = False
+
+
 class Config(_Strict):
     llm: LLMConfig
     agent: AgentConfig = AgentConfig()
@@ -145,6 +152,7 @@ class Config(_Strict):
     synth: SynthConfig = SynthConfig()
     numerics: dict[str, Any] = {}
     runs_dir: str = "runs"
+    runs: RunsConfig = RunsConfig()
 
     @field_validator("numerics")
     @classmethod

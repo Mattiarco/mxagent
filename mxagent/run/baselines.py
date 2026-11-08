@@ -23,6 +23,7 @@ from ..bench.task import Task
 from ..config import Config, ModelRole
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat
 from ..verify.verifier import VerifyReport, Verifier
+from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import RunInterrupted, interruptible, llm_by_role, write_result
 
@@ -199,4 +200,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
         finally:
             if own_verifier and verifier is not None:
                 verifier.close()
+            if not cfg.runs.keep_build_artifacts:
+                try:
+                    rec.event("cleanup", **clean_run(rec.root))
+                except Exception as e:  # noqa: BLE001 - la pulizia non deve far fallire la run
+                    rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
             write_res()
