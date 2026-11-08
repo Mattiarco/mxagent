@@ -93,6 +93,14 @@ class Runner:
                  "finished": datetime.now().isoformat(timespec="seconds")}
         if status != "done":
             entry["error"] = " | ".join(r.log.strip().splitlines()[-3:])[:500]
+            res = run_dir / "result.json"  # interrupted / failed per eccezione: lo dice la run
+            if res.is_file():
+                try:
+                    rj = json.loads(res.read_text(encoding="utf-8"))
+                    entry["result_status"] = rj.get("status")
+                    entry["error"] = (rj.get("error") or rj.get("reason") or "") + " | " + entry["error"]
+                except (OSError, ValueError):
+                    pass
         elif self.c.ppa_backends:
             entry["ppa"] = self.synth_run(j, run_dir)
         self._append(entry)

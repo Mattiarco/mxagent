@@ -14,11 +14,16 @@ from pathlib import Path
 from typing import Any
 
 from .campaign import Campaign, Job, jobs
-from .stats import geomean, mcnemar_exact, median, pass_at_k, wilson
+from .stats import geomean, mcnemar_exact, mean_std, median, pass_at_k, wilson
 
 
 def _read(p: Path) -> Any:
     return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+
+
+def _metrics(d: dict | None, backend: str) -> dict:
+    r = ((d or {}).get("results") or {}).get(backend) or {}
+    return (r.get("metrics") or {}) if r.get("ok") else {}
 
 
 def _ppa_primary(d: dict | None) -> dict | None:
@@ -54,6 +59,8 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
             q = _ppa_primary(es)
             npr = ((es or {}).get("results") or {}).get("nextpnr") or {}
             wr = _read(rd / "eval_wrap" / "wrap_report.json")
+            x7, e5 = _metrics(es, "xc7"), _metrics(es, "ecp5")
+            res = _read(rd / "result.json") or {}
             r.update({
                 "passed": bool(m.get("passed")), "stop": m.get("stop"),
                 "best_stage": m.get("best_stage"), "best_pass_rate": m.get("best_pass_rate"),
@@ -64,6 +71,13 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
                 "model": m.get("model"), "model_digest": meta_r.get("model_digest"),
                 "transistors": q.get("transistors") if q else None, "depth": q.get("depth") if q else None,
                 "fmax_min": (npr.get("metrics") or {}).get("fmax_min") if npr.get("ok") else None,
+                "fmax_mhz": (npr.get("metrics") or {}).get("fmax_mhz") if npr.get("ok") else None,
+                "adp": q["transistors"] * q["depth"] if q and q.get("transistors") and q.get("depth")
+                else None,
+                "luts_xc7": x7.get("luts"), "ffs_xc7": x7.get("ffs"),
+                "luts_ecp5": e5.get("luts"), "ffs_ecp5": e5.get("ffs"),
+                "tokens_total": (m.get("llm") or {}).get("tokens"),
+                "duplicates": res.get("duplicates"),
                 "wrapper_passed": wr.get("passed") if wr else None,
             })
             p = m.get("ppa") or {}
@@ -74,6 +88,7 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
                           "depth_pre_opt": ini.get("depth")})
         elif st:
             r["error"] = st.get("error", "")
+            r["result_status"] = st.get("result_status")
         recs.append(r)
     refs = {t: _ppa_primary(_read(out / "reference" / t / "ppa.json")) for t in c.tasks}
     return c, recs, refs
@@ -235,11 +250,59 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
                 "wrapper_n": len(wr), "wrapper_passed": sum(1 for r in wr if r.get("wrapper_passed")),
                 "wrapper_tested": sum(1 for r in wr if r.get("wrapper_passed") is not None)}
     S["m7"] = m7
+    S["stats"] = cell_stats(c, main)
     S["task_meta"] = tasks
     S["references"] = refs
-    S["errors"] = [{"job": r["job"], "status": r["status"], "error": r.get("error", "")}
+    S["errors"] = [{"job": r["job"], "status": r["status"], "error": r.get("error", ""),
+                    "result_status": r.get("result_status")}
                    for r in recs if r["status"] in ("error", "timeout")]
     return S
+
+
+#: metriche con media e deviazione standard: (chiave, su quali run, etichetta)
+STAT_METRICS = [
+    ("best_pass_rate", "done", "pass rate vettori"),
+    ("iterations", "passed", "iterazioni al pass"),
+    ("time_to_pass_s", "passed", "tempo al pass (s)"),
+    ("tokens_to_pass", "passed", "token al pass"),
+    ("tokens_total", "done", "token totali"),
+    ("adp", "passed", "ADP (transistori x profondità)"),
+    ("luts_xc7", "passed", "LUT xc7"),
+    ("ffs_xc7", "passed", "FF xc7"),
+    ("luts_ecp5", "passed", "LUT4 ecp5"),
+    ("ffs_ecp5", "passed", "FF ecp5"),
+    ("fmax_mhz", "passed", "Fmax ECP5 (MHz)"),
+]
+
+
+def cell_stats(c: Campaign, main: list[dict]) -> list[dict]:
+    """Una riga per (task, modelli, modalità): pass@1 / pass@k e media ± dev. std.
+
+    Per task e non aggregate: area, LUT ed Fmax di task diversi non si mediano.
+    """
+    rows = []
+    for t in c.tasks:
+        for ms in c.models:
+            for mode in c.modes:
+                rs = [r for r in main if r["task"] == t and r["models"] == ms and r["mode"] == mode
+                      and r["status"] == "done"]
+                ok = [r for r in rs if r.get("passed")]
+                n, k = len(rs), len(ok)
+                row: dict[str, Any] = {"task": t, "models": ms, "mode": mode, "runs": n, "passed": k,
+                                       "pass@1": pass_at_k(n, k, 1) if n else None}
+                for kk in (3, 5, 10):
+                    row[f"pass@{kk}"] = pass_at_k(n, k, kk) if n >= kk else None
+                for key, over, _ in STAT_METRICS:
+                    row[key] = mean_std(r.get(key) for r in (ok if over == "passed" else rs))
+                rows.append(row)
+    return rows
+
+
+def _ms(d: dict, fmt: str) -> str:
+    if not d or d.get("mean") is None:
+        return "–"
+    s = fmt.format(d["mean"])
+    return s + (f" ± {fmt.format(d['std'])}" if d.get("std") is not None else "")
 
 
 # ---------------------------------------------------------------- output
@@ -349,9 +412,32 @@ def render(c: Campaign, S: dict) -> str:
                          f"| {x['wrapper_passed']} / {x['wrapper_tested']} / {x['wrapper_n']} |")
         L.append("")
 
+    if S.get("stats"):
+        L += ["## Media ± deviazione standard per task, configurazione e modello", "",
+              "Run completate; iterazioni, tempo, token al pass e metriche del design solo sulle run "
+              "passate. Sintesi del design finale (`eval_synth`): ADP = transistori × profondità "
+              "(Yosys generic), LUT/FF di Yosys, Fmax mediana di nextpnr. Le stesse righe sono in "
+              "`stats.csv`.", "",
+              "| task | modelli | modalità | passate | pass@1 | pass@5 | pass@10 | pass rate vettori "
+              "| iterazioni | tempo (s) | token al pass (k) | ADP | LUT xc7 | FF xc7 | Fmax (MHz) |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for r in S["stats"]:
+            tok = r["tokens_to_pass"]
+            tokk = {**tok, "mean": tok["mean"] / 1000 if tok["mean"] is not None else None,
+                    "std": tok["std"] / 1000 if tok["std"] is not None else None}
+            L.append(f"| {r['task']} | {r['models']} | {r['mode']} | {r['passed']}/{r['runs']} "
+                     f"| {_f(r['pass@1'], '{:.2f}')} | {_f(r['pass@5'], '{:.2f}')} | {_f(r['pass@10'], '{:.2f}')} "
+                     f"| {_ms(r['best_pass_rate'], '{:.3f}')} | {_ms(r['iterations'], '{:.1f}')} "
+                     f"| {_ms(r['time_to_pass_s'], '{:.0f}')} | {_ms(tokk, '{:.1f}')} "
+                     f"| {_ms(r['adp'], '{:.0f}')} | {_ms(r['luts_xc7'], '{:.0f}')} "
+                     f"| {_ms(r['ffs_xc7'], '{:.0f}')} | {_ms(r['fmax_mhz'], '{:.1f}')} |")
+        L.append("")
+
     if S["errors"]:
         L += ["## Errori di infrastruttura (esclusi dai tassi)", ""]
-        L += [f"- `{e['job']}` {e['status']}: {e['error'][:200]}" for e in S["errors"]]
+        L += [f"- `{e['job']}` {e['status']}"
+              + (f" (result.json: {e['result_status']})" if e.get("result_status") else "")
+              + f": {e['error'][:200]}" for e in S["errors"]]
         L.append("")
     return "\n".join(L)
 
@@ -360,7 +446,9 @@ CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "pas
               "best_stage", "best_pass_rate", "iterations", "calls_to_pass", "tokens_to_pass",
               "calls_total", "time_to_pass_s", "wall_s", "model", "model_digest", "transistors",
               "depth", "transistors_pre_opt", "depth_pre_opt", "ppa_tried", "ppa_accepted", "ppa_gain",
-              "fmax_min", "wrapper_passed"]
+              "fmax_min", "fmax_mhz", "adp", "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5",
+              "tokens_total", "duplicates", "wrapper_passed"]
+STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@3", "pass@5", "pass@10"]
 
 
 def write_report(out: Path) -> dict:
@@ -371,6 +459,13 @@ def write_report(out: Path) -> dict:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(recs)
+    with (out / "stats.csv").open("w", newline="", encoding="utf-8") as f:
+        cols = STATS_CSV_FIELDS + [f"{k}_{s}" for k, _, _ in STAT_METRICS for s in ("n", "mean", "std")]
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in S["stats"]:
+            w.writerow({**{k: r[k] for k in STATS_CSV_FIELDS},
+                        **{f"{k}_{s}": r[k][s] for k, _, _ in STAT_METRICS for s in ("n", "mean", "std")}})
     (out / "report.md").write_text(render(c, S), encoding="utf-8")
     return S
 

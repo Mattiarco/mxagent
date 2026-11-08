@@ -59,6 +59,8 @@ La campagna principale ha 750 job:
   Una campagna rilanciata salta i job completati.
 - **Errori di infrastruttura:** crash e timeout del sottoprocesso sono tenuti
   distinti dai fallimenti del modello. Il report li elenca e li esclude dai tassi.
+  Se la run ha lasciato `result.json` (es. `interrupted` per SIGHUP), il suo
+  stato è riportato in `result_status`.
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.
@@ -69,7 +71,7 @@ La campagna principale ha 750 job:
 ## Report
 
 [report.py](../mxagent/eval/report.py) scrive `report.md`, `runs.csv` (una riga
-per job) e `summary.json`. Ogni numero viene da `metrics.json`, `meta.json` e
+per job), `stats.csv` (una riga per task, modelli e modalità) e `summary.json`. Ogni numero viene da `metrics.json`, `meta.json` e
 `ppa.json` delle run.
 
 | sezione | contenuto |
@@ -81,6 +83,7 @@ per job) e `summary.json`. Ogni numero viene da `metrics.json`, `meta.json` e
 | Ablation | ogni variante contro `full` sugli stessi task e seed: tassi, Δ, McNemar |
 | Vincoli di sistema (M7) | b06: target di frequenza rispettato (Fmax ECP5 peggiore sui seed ≥ target); b08: test di protocollo CV-X-IF superato col MAC generato |
 | Qualità dei risultati | transistori e profondità (Yosys generic) dei design passati rispetto al riferimento (media geometrica), tentativi e guadagno del PPA Optimizer |
+| Media ± dev. std | per task, modelli e modalità: pass@1/5/10; pass rate dei vettori e token totali (tutte le run); iterazioni, tempo e token al pass, ADP, LUT/FF xc7 ed Fmax ECP5 (run passate). Per task e non aggregate: area ed Fmax di task diversi non si mediano. Le stesse righe, con LUT/FF ecp5, sono in `stats.csv` |
 | Errori | job in errore o timeout, esclusi dai tassi |
 
 Con 10 seed per cella gli intervalli sono larghi: per esempio 5/10 dà un

@@ -84,6 +84,9 @@ def test_shipped_campaigns_are_valid(tmp_path):
     for f in (ROOT / "configs" / "eval").glob("*.yaml"):
         c = load_campaign(f)
         assert jobs(c, tmp_path)
+    c = load_campaign(ROOT / "configs" / "eval" / "b04_b05.yaml")
+    js = jobs(c, tmp_path)
+    assert len(js) == 120 and {j.task for j in js} == {"b04_mxfp4_quantize", "b05_mxfp4_dot32"}
 
 
 # ------------------------------------------------- runner + report (finti)
@@ -112,11 +115,17 @@ class FakeExec:
             out = Path(args[args.index("--out") + 1])
             out.mkdir(parents=True, exist_ok=True)
             t = 100 if "--task" in args else 80
-            (out / "ppa.json").write_text(json.dumps({"results": {"generic": {
-                "ok": True, "metrics": {"transistors": t, "depth": 10}}}}))
+            (out / "ppa.json").write_text(json.dumps({"results": {
+                "generic": {"ok": True, "metrics": {"transistors": t, "depth": 10}},
+                "xc7": {"ok": True, "metrics": {"luts": t // 10, "ffs": 0}},
+                "nextpnr": {"ok": True, "metrics": {"fmax_mhz": 200.0, "fmax_min": 190.0}}}}))
             return Result(cmd, 0, "", "", 0.1)
         run_id = args[args.index("--run-id") + 1]
         if run_id in self.crash:
+            rd = Path(args[args.index("--runs-dir") + 1]) / run_id
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "result.json").write_text(json.dumps({"status": "interrupted",
+                                                        "reason": "signal SIGHUP"}))
             return Result(cmd, 2, "", "Traceback ...\nRuntimeError: boom", 0.1)
         task, mode, variant, _, s = run_id.split("__")
         seed = int(s[1:])
@@ -143,6 +152,7 @@ def test_runner_resume_errors_and_report(tmp_path):
     assert len(done) == 21
     st = r.status()
     assert st[crash]["status"] == "error" and "boom" in st[crash]["error"]
+    assert st[crash]["result_status"] == "interrupted" and "signal SIGHUP" in st[crash]["error"]
     assert st["b01_e2m1_decode__full__main__m__s0"]["ppa"] == "ok"
     assert st["b03_e8m0_to_fp32__baseline-a__main__m__s0"].get("ppa") == "not_passed"
     # ripresa: nulla da rifare, salvo gli errori su richiesta
@@ -170,6 +180,21 @@ def test_runner_resume_errors_and_report(tmp_path):
     assert "Campagna incompleta" in md and crash in md and "| b01_e2m1_decode | 0/2 | 1/3 | 3/3 |" in md
     rows = (tmp_path / "runs.csv").read_text().splitlines()
     assert len(rows) == 22 and rows[0].startswith("job,task,mode")
+    # media ± dev. std per (task, modelli, modalità)
+    st = {(r["task"], r["mode"]): r for r in S["stats"]}
+    assert len(S["stats"]) == 2 * 3  # 2 task x 3 modalità x 1 insieme di modelli
+    b01 = st[("b01_e2m1_decode", "full")]
+    assert (b01["runs"], b01["passed"], b01["pass@1"], b01["pass@5"]) == (3, 3, 1.0, None)
+    assert b01["adp"] == {"n": 3, "mean": 800.0, "std": 0.0}
+    assert b01["luts_xc7"]["mean"] == 8 and b01["fmax_mhz"]["mean"] == 200.0
+    assert b01["time_to_pass_s"] == {"n": 3, "mean": 10.0, "std": 0.0}
+    b03a = st[("b03_e8m0_to_fp32", "baseline-a")]
+    assert b03a["passed"] == 0 and b03a["adp"] == {"n": 0, "mean": None, "std": None}
+    assert b03a["tokens_total"] == {"n": 3, "mean": 5000.0, "std": 0.0}  # su tutte le run, non solo le passate
+    assert "## Media ± deviazione standard" in md and "800 ± 0" in md
+    assert "result.json: interrupted" in md
+    srows = (tmp_path / "stats.csv").read_text().splitlines()
+    assert len(srows) == 7 and "adp_mean" in srows[0] and "pass@1" in srows[0]
 
 
 def test_report_on_partial_campaign(tmp_path):
