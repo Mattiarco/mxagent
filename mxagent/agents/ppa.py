@@ -32,10 +32,11 @@ class PPAStep:
     outcome: str  # accepted | rejected | functional_fail | no_code | synth_fail
     detail: str
     primary: tuple[float, float] | None = None
+    tag: str | None = None  # tag della verifica (None se il candidato non è stato verificato)
 
     def to_dict(self) -> dict:
         return {"n": self.n, "outcome": self.outcome, "detail": self.detail,
-                "primary": list(self.primary) if self.primary else None}
+                "primary": list(self.primary) if self.primary else None, "tag": self.tag}
 
 
 @dataclass
@@ -140,6 +141,8 @@ class PPAOptimizer:
                         if ok:
                             best, best_src, best_v, best_rep = p, cand, list(vr.verilog), pr
                             res.best_tag = vr.tag
+            if code is not None and step.outcome != "duplicate":
+                step.tag = f"{self.task.top}_ppa{i:02d}"
             res.steps.append(step)
             history.append(f"attempt {i + 1}: {idea_s} -> {step.outcome}: {step.detail}")
             self.ctx.rec.event("ppa", module=self.task.top, n=i, outcome=step.outcome,

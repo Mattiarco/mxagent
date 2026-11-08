@@ -161,7 +161,7 @@ def test_orchestrator_ppa_accepts_only_verified_improvements(tmp_path):
                      verifier_factory=lambda t, n: FakeVerifier(t), synth_fn=fake_synth)
     r = o.run()
     m = r.metrics
-    assert m["passed"] and m["states"] == ["MONOLITHIC", "PPA", "DONE"]
+    assert m["passed"] and m["states"] == ["MONOLITHIC", "PPA", "FINAL", "DONE"]
     assert m["ppa"]["tried"] == 4 and m["ppa"]["accepted"] == 1
     assert m["ppa"]["gain"] == pytest.approx(0.3)
     assert m["ppa"]["initial"]["transistors"] == 100 and m["ppa"]["final"]["transistors"] == 70
@@ -199,7 +199,7 @@ def test_orchestrator_ppa_disabled_keeps_report(tmp_path):
                      llm=ScriptedChat([code("E2M1Decode", "// ok 100,10")]),
                      verifier_factory=lambda t, n: FakeVerifier(t), synth_fn=fake_synth)
     m = o.run().metrics
-    assert m["states"] == ["MONOLITHIC", "PPA", "DONE"] and m["ppa"]["tried"] == 0
+    assert m["states"] == ["MONOLITHIC", "PPA", "FINAL", "DONE"] and m["ppa"]["tried"] == 0
     assert m["ppa"]["final"]["transistors"] == 100
 
 

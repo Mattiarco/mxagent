@@ -91,7 +91,7 @@ def test_decompose_integrate_and_library_reuse(tmp_path):
     m = o.run().metrics
     assert m["passed"] and m["strategy"] == "decompose"
     assert [b["module"] for b in m["blocks"]] == ["E2M1Mul", "AdderTree", "E8M0Pair", "FixedToFP32"]
-    assert m["states"] == ["PLAN", "BLOCK", "BLOCK", "BLOCK", "BLOCK", "INTEGRATE", "DONE"]
+    assert m["states"] == ["PLAN", "BLOCK", "BLOCK", "BLOCK", "BLOCK", "INTEGRATE", "FINAL", "DONE"]
     top_sources = log[-1][2]
     assert "class E2M1Mul" not in top_sources  # ridefinizione del submodulo rimossa
     integ = llm.requests[-1]["messages"][1]["content"]
@@ -143,7 +143,7 @@ def test_fallback_to_monolithic_when_block_fails(tmp_path):
     replies = [json.dumps(plan), code("Dec", "bug"), code("E2M1Decode")]
     o, _, _ = orch(B01, c, replies, tmp_path)
     m = o.run().metrics
-    assert m["passed"] and m["states"] == ["PLAN", "BLOCK", "FALLBACK", "MONOLITHIC", "DONE"]
+    assert m["passed"] and m["states"] == ["PLAN", "BLOCK", "FALLBACK", "MONOLITHIC", "FINAL", "DONE"]
 
 
 def test_structured_vs_raw_feedback_in_reflection(tmp_path):

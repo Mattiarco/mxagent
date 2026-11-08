@@ -13,6 +13,8 @@ tempo) è lo stesso delle baseline: il confronto è a pari costo.
 """
 from __future__ import annotations
 
+import hashlib
+import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -68,6 +70,9 @@ class Orchestrator:
         self._t_pass: float | None = None
         self._llm_at_pass: dict | None = None
         self._iters_at_pass: int | None = None
+        self._finalized = False
+        self._selected: str | None = None
+        self.final_ppa: PPAReport | None = None
         self.blocks: list[dict] = []
 
     # ------------------------------------------------------------ servizi
@@ -235,6 +240,59 @@ class Orchestrator:
         self.rec.event("wrap", **{k: v for k, v in out.items() if k != "errors"})
         return out
 
+    def _finalize_safe(self, final: SolveResult, ppa_out: dict | None) -> bool:
+        """``final/`` non deve mai far fallire una run corretta: un errore è registrato
+        e si ripiega sul salvataggio semplice del miglior candidato."""
+        try:
+            return self._finalize(final, ppa_out)
+        except Exception as e:  # noqa: BLE001 - errore di strumento: registrato
+            self.rec.event("final_error", error=f"{type(e).__name__}: {e}")
+            return False
+
+    def _finalize(self, final: SolveResult, ppa_out: dict | None) -> bool:
+        """``final/``: sorgenti, Verilog e report della verifica RIESEGUITA sul design
+        scelto, ``ppa.json`` con tutti i backend e ``selection.json`` (chi è stato scelto,
+        perché, e perché gli altri candidati sono stati scartati).
+
+        L'ultima verifica della run è questa, quindi anche ``sbt/src`` contiene il design
+        finale (``chisel.write_sources`` rimuove gli altri candidati)."""
+        best, top = final.best, self.task.top
+        assert best is not None and best.report is not None
+        self._state("FINAL")
+        opt = (ppa_out or {}).get("optimizer") or {}
+        selected = opt.get("best_tag") or best.report.tag
+        rep = self._vf(self.task, "final").verify(best.sources, f"{top}_final")
+        out = self.rec.root / "final"
+        if out.exists():
+            shutil.rmtree(out)
+        out.mkdir(parents=True)
+        for name, code in best.sources.items():
+            (out / name).write_text(code, encoding="utf-8")
+        final_sv = _copy_verilog(rep.verilog, out)
+        rep.save(out / "report.json")
+        selected_sv = _sv_hashes(best.report.verilog)  # Verilog della verifica che lo ha scelto
+        same = bool(final_sv) and all(selected_sv.get(k) == h for k, h in final_sv.items())
+        if self.final_ppa is not None:
+            self.rec.write_json("final/ppa.json", {
+                "top": top, "scope": (ppa_out or {}).get("scope"),
+                "backends": self.final_ppa.summary(), "report": self.final_ppa.to_dict()})
+        sel = {
+            "selected": selected, "module": top,
+            "reason": _selection_reason(final, opt, rep),
+            "final_verify": {"tag": rep.tag, "passed": rep.passed, "stage": rep.stage,
+                             "n_vectors": (rep.sim or {}).get("total")},
+            "sv_sha256": final_sv, "selected_sv_sha256": selected_sv, "sv_matches_selected": same,
+            "candidates": _candidates(final, opt, selected, best.report.tag),
+            "blocks": self.blocks,
+        }
+        self.rec.write_json("final/selection.json", sel)
+        self._selected = selected
+        self.rec.event("final", selected=selected, verified=rep.passed, sv_sha256=final_sv,
+                       sv_matches_selected=same)
+        if not rep.passed:  # non deterministico o ambiente cambiato: va guardato a mano
+            self.rec.event("final_verify_failed", stage=rep.stage, feedback=rep.feedback[:2000])
+        return True
+
     def _ppa_safe(self, final: SolveResult) -> dict | None:
         """Lo stadio PPA non deve mai far fallire una run già corretta."""
         try:
@@ -311,6 +369,8 @@ class Orchestrator:
                 ppa_out = self._ppa_out = self._ppa_safe(final)
             if final.passed and self.task.wrapper == "cvxif":
                 wrap_out = self._wrap(final)
+            if final.passed:
+                self._finalized = self._finalize_safe(final, ppa_out)
         except BudgetExceeded as e:
             stop = f"budget: {e}"
             self.rec.event("budget_exhausted", limit=e.limit, detail=str(e),
@@ -329,7 +389,7 @@ class Orchestrator:
             self._state("FAILED", reason=stop)
         self._outcome = {"status": "done" if passed else "failed", "reason": "pass" if passed else stop}
         best = final.best if final else None
-        if best:
+        if best and not self._finalized:  # run fallita: miglior tentativo, non verificato di nuovo
             self.rec.save_final(best.sources, best.report.verilog if best.report else [])
         b = best.report if best else None
         c = self.ctx.counters
@@ -365,7 +425,7 @@ class Orchestrator:
             c, bud = self.ctx.counters, self.budget.to_dict()
             out = self._ppa_out or {}
             opt = out.get("optimizer") or {}
-            best_tag = opt.get("best_tag") or (b.tag if b else None)
+            best_tag = self._selected or opt.get("best_tag") or (b.tag if b else None)
             result = {
                 "task": self.task.name, "mode": self.mode, "model": self.cfg.llm.roles["coder"].model,
                 "seed": self.seed, **self._outcome,
@@ -384,11 +444,76 @@ class Orchestrator:
                     "objective": opt.get("objective"), "gain": opt.get("gain"), "stop": opt.get("stop"),
                     "attempts": ppa_attempts(out), "initial": out.get("initial"),
                     "final": out.get("final"), "error": out.get("error")},
+                "final_dir": "final" if self._finalized else None,
                 "states": self.states,
             }
             write_result(self.rec, result)
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
             self.rec.event("result_error", error=f"{type(e).__name__}: {e}")
+
+
+def _sv_hashes(files: list[str]) -> dict[str, str]:
+    """sha256 dei file Verilog esistenti, per nome."""
+    out = {}
+    for f in map(Path, files):
+        if f.is_file() and f.suffix in (".sv", ".v"):
+            out[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def _copy_verilog(files: list[str], dst: Path) -> dict[str, str]:
+    for f in map(Path, files):
+        if f.is_file():
+            shutil.copyfile(f, dst / f.name)
+    return _sv_hashes([str(dst / Path(f).name) for f in files])
+
+
+def _rate(r) -> float | None:
+    return (r.sim or {}).get("pass_rate") if r is not None else None
+
+
+def _selection_reason(final: SolveResult, opt: dict, rep) -> str:
+    n = (rep.sim or {}).get("total")
+    vec = f"all {n} vectors bit-exact" if n else "all vectors bit-exact"
+    if opt.get("best_tag"):
+        acc = [s for s in opt.get("steps", []) if s.get("tag") == opt["best_tag"]]
+        why = acc[0]["detail"] if acc else ""
+        return f"PPA candidate accepted ({opt.get('objective')}: {why}); {vec}"
+    ppa = ""
+    if opt:
+        ppa = f"; PPA optimizer: {opt.get('tried', 0)} attempts, none accepted ({opt.get('stop')})"
+    return f"first candidate to pass ({final.module}, {vec}){ppa}"
+
+
+def _candidates(final: SolveResult, opt: dict, selected: str, functional: str) -> list[dict]:
+    """Ogni candidato del top-level con esito e motivo dello scarto."""
+    out = []
+    for i, a in enumerate(final.attempts):
+        r = a.report
+        tag = r.tag if r is not None else None
+        d = {"id": tag, "phase": "solve", "n": i, "origin": a.origin,
+             "stage": r.stage if r is not None else "no_code", "pass_rate": _rate(r)}
+        if tag == selected:
+            d.update(outcome="selected", reason="")
+        elif r is not None and r.passed and tag == functional:
+            d.update(outcome="superseded", reason=f"correct, replaced by PPA candidate {selected}")
+        elif r is not None and r.passed:
+            d.update(outcome="discarded", reason="correct, but not the best-ranked passing candidate")
+        elif r is None:
+            d.update(outcome="discarded", reason="no Scala code in the answer")
+        else:
+            rate = _rate(r)
+            d.update(outcome="discarded", reason=f"failed at {r.stage}"
+                     + (f" ({rate:.1%} vectors pass)" if rate is not None else ""))
+        out.append(d)
+    for s in opt.get("steps", []):
+        tag = s.get("tag")
+        outcome = "selected" if tag and tag == selected else s["outcome"]
+        if s["outcome"] == "accepted" and outcome != "selected":
+            outcome = "superseded"
+        out.append({"id": tag, "phase": "ppa", "n": s["n"], "origin": "ppa", "outcome": outcome,
+                    "reason": s["detail"] if outcome != "selected" else "", "primary": s.get("primary")})
+    return out
 
 
 def final_backend_list(backends: list[str]) -> list[str]:

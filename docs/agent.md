@@ -21,9 +21,34 @@
                                   PPA ◀─────────────────────────────────────┘
                      (sintesi + PPA Optimizer, solo dopo il pass: docs/ppa.md)
                                     ▼
+                                  FINAL
+                     (verifica rieseguita sul design scelto, final/)
+                                    ▼
                               DONE | FAILED
                      (componenti verificati salvati in library/)
 ```
+
+## Design finale: `final/`
+
+In una run superata lo stato `FINAL` riesegue la verifica completa sul design
+scelto e scrive `final/`:
+
+| file | contenuto |
+|---|---|
+| `<Top>.scala` (+ sottomoduli) | sorgenti del candidato scelto |
+| `<Top>.sv` | Verilog emesso dalla verifica rieseguita |
+| `report.json` | report di quella verifica |
+| `ppa.json` | sintesi del design finale su tutti i backend (vedi docs/ppa.md) |
+| `selection.json` | candidato scelto e perché; ogni altro candidato con esito e motivo dello scarto |
+
+`selection.json` riporta anche lo sha256 del `.sv` finale e di quello del
+candidato scelto (`sv_matches_selected`).
+
+Questa è l'ultima verifica della run, quindi anche `sbt/src` contiene solo il
+design finale.
+
+In una run fallita `final/` contiene solo i sorgenti del miglior tentativo,
+senza `selection.json`; in `result.json` il campo `final_dir` è `null`.
 
 ## Fine della run: `result.json`
 

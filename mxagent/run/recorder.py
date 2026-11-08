@@ -4,7 +4,8 @@
     meta.json       task, modalità, seed, versioni toolchain, digest dei modelli, hash dei prompt
     trace.json      eventi in ordine: chiamate LLM (prompt, risposta, token) e verifiche
     candidates/NN/  sorgenti di ogni iterazione
-    final/          sorgenti e Verilog del miglior candidato
+    final/          design scelto: sorgenti, .sv, report.json (verifica rieseguita), ppa.json,
+                    selection.json (run superate; altrimenti solo il miglior tentativo)
     metrics.json    metriche della run (dai tool, mai stimate); solo se la run arriva in fondo
     result.json     esito SEMPRE presente: done | failed | interrupted (vedi run/result.py)
 """
