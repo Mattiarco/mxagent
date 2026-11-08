@@ -45,9 +45,18 @@ def test_parse_ltp_real_output():
 def test_fpga_metrics():
     m = yosys.fpga_metrics("ecp5", {"LUT4": 2489, "CCU2C": 228, "PFUMX": 766, "L6MUX21": 414,
                                     "MULT18X18D": 32})
-    assert m == {"luts": 2489, "carry": 228, "muxes": 1180, "dsp": 32, "ffs": 0}
-    m = yosys.fpga_metrics("xc7", {"LUT2": 206, "LUT6": 532, "CARRY4": 159, "MUXF7": 1, "FDRE": 3})
-    assert m == {"luts": 738, "carry": 159, "muxes": 1, "dsp": 0, "ffs": 3}
+    assert m == {"luts": 2489, "carry": 228, "muxes": 1180, "dsp": 32, "bram": 0, "ffs": 0}
+    m = yosys.fpga_metrics("xc7", {"LUT2": 206, "LUT6": 532, "CARRY4": 159, "MUXF7": 1, "FDRE": 3,
+                                   "RAMB18E1": 2})
+    assert m == {"luts": 738, "carry": 159, "muxes": 1, "dsp": 0, "bram": 2, "ffs": 3}
+
+
+def test_fmax_statistics_and_slack():
+    m = nextpnr.fmax_metrics([100.0, 125.0, 80.0], clock_ns=10.0)
+    assert m["fmax_mhz"] == 100.0 and m["fmax_mean"] == pytest.approx(101.67)
+    assert m["fmax_min"] == 80.0 and m["fmax_max"] == 125.0
+    assert m["fmax_per_seed"] == [100.0, 125.0, 80.0] and m["seeds"] == 3
+    assert m["slack_ns"] == pytest.approx(10.0 - 12.5)  # seed peggiore: 12.5 ns > 10 ns
 
 
 def test_nextpnr_report_parser():
@@ -162,6 +171,11 @@ def test_orchestrator_ppa_accepts_only_verified_improvements(tmp_path):
     outcomes = [s["outcome"] for s in ppa["optimizer"]["steps"]]
     assert outcomes == ["functional_fail", "rejected", "accepted", "no_code"]
     assert ppa["initial"]["ecp5"]["skipped"] is True
+    # il design finale passa su tutti i backend della config più vivado (skipped se assente)
+    assert list(ppa["final"]) == ["generic", "ecp5", "vivado"] and ppa["final"]["generic"]["ok"]
+    assert ppa["scope"] == {"loop": ["generic"], "final": ["generic", "ecp5", "vivado"]}
+    scope = [e for e in json.loads((r.run_dir / "trace.json").read_text()) if e["kind"] == "ppa_scope"]
+    assert scope and scope[0]["loop_backends"] == ["generic"]
     final = (r.run_dir / "final" / "E2M1Decode.scala").read_text()
     assert "70,10" in final
     assert "100,10" in (r.run_dir / "final_functional" / "E2M1Decode.scala").read_text()
@@ -225,7 +239,38 @@ def test_nextpnr_fmax_on_b03(tmp_path):
 def test_missing_tools_are_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     yosys.has_slang.cache_clear()
-    rep = synthesize([FX / "verilog" / "E8M0ToFP32.sv"], B03, cfg().synth, tmp_path,
-                     backends=["generic", "nextpnr", "opensta", "vivado"])
-    assert all(r.skipped and not r.ok for r in rep.results.values())
+    wanted = ["generic", "ecp5", "xc7", "nextpnr", "opensta", "vivado"]
+    rep = synthesize([FX / "verilog" / "E8M0ToFP32.sv"], B03, cfg().synth, tmp_path, backends=wanted)
+    assert list(rep.results) == wanted  # nessun backend sparisce
+    assert all(r.skipped and not r.ok and r.error for r in rep.results.values())
+    assert "nextpnr-ecp5" in rep.results["nextpnr"].error and "PATH" in rep.results["nextpnr"].error
+    summ = rep.summary()
+    assert all(set(d) >= {"ok", "skipped", "error"} for d in summ.values())
+    saved = json.loads((tmp_path / "ppa.json").read_text())
+    assert list(saved["results"]) == wanted
     yosys.has_slang.cache_clear()
+
+
+def test_backend_exception_becomes_error_entry(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("nextpnr segfault")
+    monkeypatch.setattr(nextpnr, "pnr_ecp5", boom)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    yosys.has_slang.cache_clear()
+    rep = synthesize([FX / "verilog" / "E8M0ToFP32.sv"], B03, cfg().synth, tmp_path,
+                     backends=["generic", "nextpnr"])
+    r = rep.results["nextpnr"]
+    assert not r.ok and not r.skipped and "OSError: nextpnr segfault" in r.error
+    assert rep.summary()["nextpnr"] == {"ok": False, "skipped": False, "error": r.error}
+    yosys.has_slang.cache_clear()
+
+
+def test_doctor_synth_lists_every_backend(monkeypatch):
+    from mxagent.config import SYNTH_BACKENDS
+    from mxagent.doctor import synth_backends
+    monkeypatch.setattr(shutil, "which", lambda name: "/x/yosys" if name == "yosys" else None)
+    checks = {c.name: c for c in synth_backends(["generic", "nextpnr"])}
+    assert len(checks) == len(SYNTH_BACKENDS)
+    assert checks["synth:generic [config]"].ok and not checks["synth:nextpnr [config]"].ok
+    assert checks["synth:xc7"].ok and not checks["synth:vivado"].ok
+    assert not any(c.required for c in checks.values())

@@ -5,17 +5,23 @@ eseguiti davvero**: ogni numero nei report viene da un file prodotto da Yosys,
 nextpnr, OpenSTA o Vivado. Un backend assente sulla macchina viene marcato
 `skipped` e non produce numeri.
 
+Ogni backend richiesto ha **sempre** una voce nel report, con `ok`, `skipped` ed
+`error`. Se lo strumento manca la voce è `skipped`, con il motivo in `error`
+(es. `nextpnr-ecp5 non trovato nel PATH`). Se lo strumento fallisce o solleva
+un'eccezione la voce ha `ok: false` e l'errore: un backend non sparisce mai.
+`mxagent doctor --synth` elenca i backend disponibili e quelli mancanti.
+
 ## Backend
 
 | backend | strumento | metriche | note |
 |---|---|---|---|
 | `generic` | Yosys `synth -flatten` + `abc -g cmos2` | `transistors` (stima `stat -tech cmos`), `depth` (livelli di porta, `ltp -noff`), `cells` | indipendente dalla tecnologia, veloce; **metrica primaria** del PPA Optimizer |
 | `liberty` | Yosys + `abc -liberty <.lib>` | `area` (unità della libreria), `depth` | serve `synth.liberty` (es. Nangate45, sky130) |
-| `ecp5` | Yosys `synth_ecp5` | `luts` (LUT4), `carry` (CCU2C), `muxes` (PFUMX+L6MUX21), `dsp`, `depth` | |
-| `xc7` | Yosys `synth_xilinx -family xc7` | `luts` (LUT1–6), `carry` (CARRY4), `muxes` (MUXF7/8), `dsp`, `depth` | `cells` include i buffer di I/O |
-| `nextpnr` | Yosys + nextpnr-ecp5 (LFE5U-85F, CABGA381) | `fmax_mhz` (mediana su `pnr_seeds`), `fmax_min`, `fmax_max`, `crit_ns` | wrapper registrato, vedi sotto |
+| `ecp5` | Yosys `synth_ecp5` | `luts` (LUT4), `carry` (CCU2C), `muxes` (PFUMX+L6MUX21), `dsp`, `bram`, `ffs`, `depth` | |
+| `xc7` | Yosys `synth_xilinx -family xc7` | `luts` (LUT1–6), `carry` (CARRY4), `muxes` (MUXF7/8), `dsp`, `bram`, `ffs`, `depth` (livelli di LUT) | `cells` include i buffer di I/O |
+| `nextpnr` | Yosys + nextpnr-ecp5 (LFE5U-85F, CABGA381) | `fmax_mhz` (mediana su `pnr_seeds`), `fmax_mean`, `fmax_min`, `fmax_max`, `fmax_per_seed`, `crit_ns`, `slack_ns` (rispetto a `clock_ns`, sul seed peggiore) | wrapper registrato, vedi sotto |
 | `opensta` | Yosys (liberty) + OpenSTA | `delay` (data arrival time), `area` | **non validato**: OpenSTA non era installato |
-| `vivado` | Vivado batch, out-of-context, place & route | `luts`, `ffs`, `carry`, `dsp`, `wns_ns`, `fmax_mhz` | **non validato**: Vivado non era installato |
+| `vivado` | Vivado batch, out-of-context, place & route | `luts`, `ffs`, `carry`, `dsp`, `bram`, `wns_ns` = `slack_ns`, `fmax_mhz` | **non validato**: Vivado non era installato |
 
 Per OpenSTA e Vivado sono testati solo i parser, su estratti dei formati
 documentati. Il primo run con lo strumento vero va controllato a mano.
@@ -34,6 +40,12 @@ di I/O, più dei pin dell'FPGA. Il wrapper ([wrapper.py](../mxagent/synth/wrappe
 Il cammino misurato è quindi registro → DUT → registro. Siccome tutte le uscite
 sono osservate, la sintesi non può eliminare logica del DUT. Le risorse si
 riportano dalla sintesi del DUT da solo; la Fmax viene dal wrapper.
+Le voci misurate nel wrapper (`nextpnr`, `vivado`) hanno `wrapped: true`.
+
+Per un modulo combinatorio (latenza 0) il ritardo combinatorio è riportato in
+due forme: `depth` (livelli di porta o di LUT, dalla sintesi) e `crit_ns` di
+`nextpnr`, che è il cammino registro → DUT → registro e include quindi anche
+clock-to-q e setup dei registri del wrapper.
 
 ## PPA dei riferimenti
 
@@ -91,8 +103,10 @@ Lo stadio `PPA` parte **solo dopo il pass** ([orchestrator.py](../mxagent/agents
    - con `delay`, l'area non può peggiorare di oltre `tolerance`.
 5. Il design di partenza resta il migliore finché nessun candidato lo batte,
    quindi lo stadio PPA **non può rendere sbagliato un design corretto**.
-6. Report completo (tutti i `synth.backends`) del design di partenza e, se è
-   cambiato, di quello finale.
+6. Report completo del design di partenza e, se è cambiato, di quello finale,
+   su tutti i `synth.backends` più `vivado` (che risulta `skipped` se non è nel
+   PATH). Nel loop dell'optimizer si sintetizza solo `primary`, per velocità:
+   la scelta è dichiarata nel trace (evento `ppa_scope`) e in `ppa.json["scope"]`.
 
 Lo stadio PPA non cambia le metriche funzionali.
 - `passed`, `time_to_pass_s` e `llm_to_pass` (il budget al momento del pass)

@@ -181,7 +181,14 @@ class Orchestrator:
         def primary(verilog: list[str], tag: str) -> PPAReport:
             return self._synth(verilog, self.task, s, work / tag, backends=[s.primary])
 
-        out: dict = {"tools": _yosys.tool_versions()}
+        final_backends = final_backend_list(s.backends)
+        out: dict = {"tools": _yosys.tool_versions(),
+                     "scope": {"loop": [s.primary], "final": final_backends}}
+        # nel loop dell'optimizer si sintetizza solo la metrica primaria (velocità);
+        # il design di partenza e quello finale passano su tutti i backend
+        self.rec.event("ppa_scope", loop_backends=[s.primary], final_backends=final_backends,
+                       note="optimizer loop uses only the primary backend; initial and final "
+                            "designs are synthesized on all final_backends")
         start = primary(best.report.verilog, "initial")
         res = None
         if self.cfg.agent.ppa and s.optimize_iters > 0:
@@ -191,15 +198,17 @@ class Orchestrator:
             res = opt.run(best.sources, best.report.verilog, start)
             out["optimizer"] = res.to_dict(s.objective)
         # report completo (tutti i backend) del design di partenza e, se cambiato, del finale
-        others = [b for b in s.backends if b != s.primary]
+        others = [b for b in final_backends if b != s.primary]
         full0 = self._synth(best.report.verilog, self.task, s, work / "full_initial", backends=others)
         full0.results = {s.primary: start.results[s.primary], **full0.results}
         out["initial"] = full0.summary()
+        self.final_ppa = full0
         if res and res.accepted:
             for name, code in best.sources.items():
                 self.rec.write_text(f"final_functional/{name}", code)
-            full1 = self._synth(res.verilog, self.task, s, work / "full_final", backends=s.backends)
+            full1 = self._synth(res.verilog, self.task, s, work / "full_final", backends=final_backends)
             out["final"] = full1.summary()
+            self.final_ppa = full1
             best.sources, best.report.verilog = res.sources, res.verilog
         else:
             out["final"] = out["initial"]
@@ -314,6 +323,12 @@ class Orchestrator:
         self.rec.write_json("metrics.json", metrics)
         return RunResult(self.rec.root, metrics, b, [a.report for a in (final.attempts if final else [])
                                                       if a.report])
+
+
+def final_backend_list(backends: list[str]) -> list[str]:
+    """Backend del report finale: quelli della config più Vivado, sempre presente
+    (``skipped`` col motivo se non è nel PATH)."""
+    return list(dict.fromkeys([*backends, "vivado"]))
 
 
 def _ppa_metrics(out: dict | None, primary: str, target_mhz: float | None = None) -> dict | None:

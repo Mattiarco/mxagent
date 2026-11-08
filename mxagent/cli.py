@@ -1,6 +1,6 @@
 """CLI headless di mxagent.
 
-    mxagent doctor [--warmup] [--config configs/default.yaml]
+    mxagent doctor [--warmup] [--synth] [--config configs/default.yaml]
     mxagent golden card   [--format mxfp4|nvfp4]
     mxagent golden dot    --a-scale 127 --a 2,2,... --b-scale 127 --b 2,2,...
     mxagent golden quant  --x 1.0,-2.5,...
@@ -42,6 +42,15 @@ def cmd_doctor(a: argparse.Namespace) -> int:
     from .doctor import format_checks, run_checks
 
     cfg = load_config(a.config)
+    if a.synth:
+        from .doctor import synth_backends
+        print(f"mxagent {__version__} - backend di sintesi (synth.backends = {cfg.synth.backends})\n")
+        checks = synth_backends(cfg.synth.backends, cfg.synth.liberty)
+        print("\n".join(format_checks(checks).splitlines()[:-2]))  # senza "ambiente pronto"
+        miss = [c.name for c in checks if not c.ok and "[config]" in c.name]
+        if miss:
+            print(f"backend in config non disponibili (saranno 'skipped' nel ppa.json): {', '.join(miss)}")
+        return 0
     checks = run_checks(cfg.llm.host, cfg.llm.models(), do_warmup=a.warmup, skip_llm=a.skip_llm)
     print(f"mxagent {__version__} - controllo dell'ambiente\n")
     print(format_checks(checks))
@@ -277,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--config", default="configs/default.yaml")
     d.add_argument("--warmup", action="store_true", help="elabora un modulo di prova (popola le cache)")
     d.add_argument("--skip-llm", action="store_true", help="non controllare Ollama (solo toolchain HW)")
+    d.add_argument("--synth", action="store_true", help="elenca i backend di sintesi disponibili/mancanti")
     d.set_defaults(func=cmd_doctor)
 
     gp = sub.add_parser("golden", help="interroga il golden model")

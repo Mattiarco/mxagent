@@ -29,6 +29,18 @@ def parse_report(text: str) -> float | None:
     return min(vals) if vals else None
 
 
+def fmax_metrics(fmax: list[float], clock_ns: float) -> dict:
+    """Statistiche sui seed. Lo slack è rispetto a ``clock_ns`` sul seed PEGGIORE;
+    ``crit_ns`` (mediana) è il cammino registro -> DUT -> registro del wrapper, cioè
+    il ritardo combinatorio del modulo più clock-to-q e setup."""
+    med, worst = statistics.median(fmax), min(fmax)
+    return {"fmax_mhz": round(med, 2), "fmax_mean": round(statistics.fmean(fmax), 2),
+            "fmax_min": round(worst, 2), "fmax_max": round(max(fmax), 2),
+            "fmax_per_seed": [round(f, 2) for f in fmax],
+            "crit_ns": round(1000.0 / med, 3), "clock_ns": clock_ns,
+            "slack_ns": round(clock_ns - 1000.0 / worst, 3), "seeds": len(fmax)}
+
+
 def pnr_ecp5(files: list[Path], task: Task, work: Path, *, device: str = "85k",
              package: str = "CABGA381", clock_ns: float = 10.0, seeds: list[int] | None = None,
              timeout: float = 1800) -> yosys.SynthResult:
@@ -67,10 +79,8 @@ def pnr_ecp5(files: list[Path], task: Task, work: Path, *, device: str = "85k",
     if not fmax:
         res.error = res.error or "nessuna Fmax nel report di nextpnr"
         return res
-    med = statistics.median(fmax)
-    res.metrics = {"fmax_mhz": round(med, 2), "fmax_min": round(min(fmax), 2),
-                   "fmax_max": round(max(fmax), 2), "crit_ns": round(1000.0 / med, 3),
-                   "seeds": len(fmax)}
+    res.metrics = fmax_metrics(fmax, clock_ns)
+    res.wrapped = True
     res.cells = {k: int(v["used"]) for k, v in util.items() if isinstance(v, dict) and v.get("used")}
     res.ok = True
     return res

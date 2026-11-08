@@ -41,9 +41,19 @@ class PPAReport:
         return cls(d["top"], {k: SynthResult.from_dict(v) for k, v in d["results"].items()})
 
     def summary(self) -> dict:
-        """Metriche compatte per metrics.json e le tabelle di M6."""
-        return {k: (r.metrics if r.ok else {"error": r.error, "skipped": r.skipped})
-                for k, r in self.results.items()}
+        """Metriche compatte per metrics.json e le tabelle di M6.
+
+        Ogni backend ha sempre ``ok``/``skipped``/``error``; le metriche ci sono solo se ``ok``.
+        """
+        out = {}
+        for k, r in self.results.items():
+            d: dict = {"ok": r.ok, "skipped": r.skipped, "error": r.error or None}
+            if r.ok:
+                d.update(r.metrics)
+            if r.wrapped:
+                d["wrapped"] = True
+            out[k] = d
+        return out
 
     def render(self, max_cells: int = 10) -> str:
         lines = []
@@ -87,25 +97,33 @@ def accept(old: tuple[float, float], new: tuple[float, float], cfg: SynthConfig)
     return True, f"{cfg.objective} {o_old:g} -> {o_new:g} ({-gain:+.1%})"
 
 
+def _one(b: str, files: list[Path], task: Task, cfg: SynthConfig, w: Path) -> SynthResult:
+    if b in yosys.FLOWS:
+        return yosys.synth(files, task.top, b, w, liberty=cfg.liberty, timeout=cfg.timeout_s)
+    if b == "nextpnr":
+        return nextpnr.pnr_ecp5(files, task, w, device=cfg.ecp5_device, package=cfg.ecp5_package,
+                                clock_ns=cfg.clock_ns, seeds=cfg.pnr_seeds, timeout=cfg.timeout_s)
+    if b == "opensta":
+        return external.opensta(files, task.top, w, cfg.liberty, timeout=cfg.timeout_s)
+    if b == "vivado":
+        return external.vivado(files, task, w, part=cfg.fpga_part, clock_ns=cfg.clock_ns,
+                               timeout=cfg.timeout_s)
+    return SynthResult(b, False, error=f"backend sconosciuto {b}")
+
+
 def synthesize(verilog: list[str | Path], task: Task, cfg: SynthConfig, work: Path,
                backends: list[str] | None = None) -> PPAReport:
+    """Una voce per OGNI backend richiesto: metriche, ``skipped`` col motivo o ``error``.
+
+    Un backend non sparisce mai dal report, nemmeno se lo strumento solleva un'eccezione.
+    """
     files = [Path(v) for v in verilog if str(v).endswith((".sv", ".v"))]
     rep = PPAReport(task.top)
-    for b in backends or cfg.backends:
-        w = work / b
-        if b in yosys.FLOWS:
-            rep.results[b] = yosys.synth(files, task.top, b, w, liberty=cfg.liberty, timeout=cfg.timeout_s)
-        elif b == "nextpnr":
-            rep.results[b] = nextpnr.pnr_ecp5(files, task, w, device=cfg.ecp5_device,
-                                              package=cfg.ecp5_package, clock_ns=cfg.clock_ns,
-                                              seeds=cfg.pnr_seeds, timeout=cfg.timeout_s)
-        elif b == "opensta":
-            rep.results[b] = external.opensta(files, task.top, w, cfg.liberty, timeout=cfg.timeout_s)
-        elif b == "vivado":
-            rep.results[b] = external.vivado(files, task, w, part=cfg.fpga_part, clock_ns=cfg.clock_ns,
-                                             timeout=cfg.timeout_s)
-        else:
-            raise ValueError(f"backend sconosciuto {b}")
+    for b in dict.fromkeys(backends or cfg.backends):
+        try:
+            rep.results[b] = _one(b, files, task, cfg, work / b)
+        except Exception as e:  # noqa: BLE001 - errore di strumento: registrato nella voce
+            rep.results[b] = SynthResult(b, False, error=f"{type(e).__name__}: {e}"[:500])
     work.mkdir(parents=True, exist_ok=True)
     (work / "ppa.json").write_text(json.dumps(rep.to_dict(), indent=1), encoding="utf-8")
     return rep

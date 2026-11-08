@@ -241,6 +241,36 @@ def run_checks(host: str | None, models: list[str], do_warmup: bool = False,
     return checks
 
 
+def synth_backends(backends: list[str], liberty: str | None = None) -> list[Check]:
+    """Disponibilità di ogni backend di sintesi (``mxagent doctor --synth``).
+
+    Un backend non disponibile non ferma le run: compare nel ppa.json come ``skipped``.
+    I backend elencati in ``synth.backends`` sono marcati ``[config]``.
+    """
+    from .config import SYNTH_BACKENDS
+
+    yos = which("yosys")
+    lib = f"synth.liberty={liberty}" if liberty else "synth.liberty non impostato"
+    need: dict[str, tuple[bool, str, str]] = {
+        "generic": (bool(yos), "yosys (abc -g cmos2)", _oss_hint()),
+        "liberty": (bool(yos and liberty), f"yosys + .lib ({lib})",
+                    "imposta synth.liberty a un file .lib (es. Nangate45, sky130)"),
+        "ecp5": (bool(yos), "yosys synth_ecp5", _oss_hint()),
+        "xc7": (bool(yos), "yosys synth_xilinx", _oss_hint()),
+        "nextpnr": (bool(yos and which("nextpnr-ecp5")), "yosys + nextpnr-ecp5", _oss_hint()),
+        "opensta": (bool(which("sta") and liberty), f"sta + .lib ({lib})",
+                    "compila OpenSTA (parallaxsw/OpenSTA) e imposta synth.liberty"),
+        "vivado": (bool(which("vivado")), "vivado nel PATH", "source <Vivado>/settings64.sh"),
+    }
+    out = []
+    for b in SYNTH_BACKENDS:
+        ok, what, hint = need[b]
+        tag = " [config]" if b in backends else ""
+        out.append(Check(f"synth:{b}{tag}", ok, ("disponibile: " if ok else "mancante: ") + what,
+                         hint, required=False))
+    return out
+
+
 def format_checks(checks: list[Check]) -> str:
     lines = []
     for c in checks:
