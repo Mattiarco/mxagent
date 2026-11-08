@@ -24,6 +24,7 @@ from ..config import Config, ModelRole
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat
 from ..verify.verifier import VerifyReport, Verifier
 from .recorder import Recorder, new_run_id
+from .result import RunInterrupted, interruptible, llm_by_role, write_result
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b")
@@ -109,61 +110,93 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     stop, pass_iter, time_to_pass = "max_iters", None, None
     no_code = repeated = truncations = 0
     prev_keys: list[str] | None = None
-    try:
-        for it in range(st.max_fix_iters + 1):
-            truncations += _fit_history(messages, role.num_ctx, role.num_predict)
-            r = llm.chat(messages, model=role.model, temperature=role.temperature,
-                         num_ctx=role.num_ctx, num_predict=role.num_predict,
-                         seed=seed + it, tag=f"{mode}:{it}")
-            rec.event("llm", iter=it, messages=messages[-1:] if it else messages,
-                      response=r.text, tokens=[r.prompt_tokens, r.completion_tokens],
-                      seconds=round(r.seconds, 2), cached=r.cached, done_reason=r.done_reason)
-            code = extract_scala(r.text, task.top)
-            if code is None:
-                no_code += 1
-                fb = "No ```scala code block was found in your answer."
-                rec.event("verify", iter=it, stage="no_code", passed=False)
-            else:
-                sources = {f"{task.top}.scala": code}
-                rec.save_candidate(it, sources)
-                rep = verify_fn(sources, f"it{it:02d}")
-                reports.append(rep)
-                rec.event("verify", iter=it, stage=rep.stage, passed=rep.passed,
-                          score=list(rep.score), seconds=rep.seconds, feedback=rep.feedback,
-                          error_keys=rep.error_keys)
-                if prev_keys is not None and rep.error_keys and rep.error_keys == prev_keys:
-                    repeated += 1
-                prev_keys = rep.error_keys
-                if best is None or rep.score > best[0].score:
-                    best = (rep, sources)
-                if rep.passed:
-                    stop, pass_iter, time_to_pass = "pass", it + 1, time.monotonic() - t0
-                    break
-                fb = rep.feedback_raw if st.feedback == "raw" else rep.feedback
-            if it == st.max_fix_iters:
-                break
-            messages += [{"role": "assistant", "content": r.text},
-                         {"role": "user", "content": prompts.render(names[2], feedback=fb)}]
-    except BudgetExceeded as e:
-        stop = f"budget: {e}"
-    finally:
-        if own_verifier and verifier is not None:
-            verifier.close()
+    outcome: dict = {"status": "failed", "reason": "run non terminata"}
 
-    if best:
-        rec.save_final(best[1], best[0].verilog)
-    b = best[0] if best else None
-    metrics = {
-        "task": task.name, "mode": mode, "model": role.model, "seed": seed,
-        "passed": stop == "pass", "stop": stop,
-        "iterations": len(reports) + no_code, "pass_iter": pass_iter,
-        "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
-        "wall_s": round(time.monotonic() - t0, 1),
-        "best_stage": b.stage if b else "no_code",
-        "best_pass_rate": b.sim.get("pass_rate", 0.0) if b else 0.0,
-        "stages": [r.stage for r in reports],
-        "no_code": no_code, "repeated_errors": repeated, "history_truncations": truncations,
-        "llm": budget.to_dict(),
-    }
-    rec.write_json("metrics.json", metrics)
-    return RunResult(rec.root, metrics, b, reports)
+    def write_res() -> None:
+        """result.json con lo stato corrente (le variabili sono lette alla chiamata)."""
+        b = best[0] if best else None
+        sim = (b.sim if b else None) or {}
+        bud = budget.to_dict()
+        try:
+            write_result(rec, {
+                "task": task.name, "mode": mode, "model": role.model, "seed": seed, **outcome,
+                "passed": stop == "pass", "pass_rate": sim.get("pass_rate", 0.0),
+                "n_vectors": sim.get("total"), "best_stage": b.stage if b else "no_code",
+                "best_candidate": b.tag if b else None,
+                "iterations": len(reports) + no_code, "iterations_to_pass": pass_iter,
+                "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
+                "wall_s": round(time.monotonic() - t0, 1), "llm_calls": bud["calls"],
+                "tokens_in": bud["prompt_tokens"], "tokens_out": bud["completion_tokens"],
+                "llm_by_role": llm_by_role(rec.events), "duplicates": 0, "ppa": None})
+        except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
+            rec.event("result_error", error=f"{type(e).__name__}: {e}")
+
+    with interruptible():
+        try:
+            try:
+                for it in range(st.max_fix_iters + 1):
+                    truncations += _fit_history(messages, role.num_ctx, role.num_predict)
+                    r = llm.chat(messages, model=role.model, temperature=role.temperature,
+                                 num_ctx=role.num_ctx, num_predict=role.num_predict,
+                                 seed=seed + it, tag=f"{mode}:{it}")
+                    rec.event("llm", iter=it, messages=messages[-1:] if it else messages,
+                              response=r.text, tokens=[r.prompt_tokens, r.completion_tokens],
+                              seconds=round(r.seconds, 2), cached=r.cached, done_reason=r.done_reason)
+                    code = extract_scala(r.text, task.top)
+                    if code is None:
+                        no_code += 1
+                        fb = "No ```scala code block was found in your answer."
+                        rec.event("verify", iter=it, stage="no_code", passed=False)
+                    else:
+                        sources = {f"{task.top}.scala": code}
+                        rec.save_candidate(it, sources)
+                        rep = verify_fn(sources, f"it{it:02d}")
+                        reports.append(rep)
+                        rec.event("verify", iter=it, stage=rep.stage, passed=rep.passed,
+                                  score=list(rep.score), seconds=rep.seconds, feedback=rep.feedback,
+                                  error_keys=rep.error_keys)
+                        if prev_keys is not None and rep.error_keys and rep.error_keys == prev_keys:
+                            repeated += 1
+                        prev_keys = rep.error_keys
+                        if best is None or rep.score > best[0].score:
+                            best = (rep, sources)
+                        if rep.passed:
+                            stop, pass_iter, time_to_pass = "pass", it + 1, time.monotonic() - t0
+                            break
+                        fb = rep.feedback_raw if st.feedback == "raw" else rep.feedback
+                    if it == st.max_fix_iters:
+                        break
+                    messages += [{"role": "assistant", "content": r.text},
+                                 {"role": "user", "content": prompts.render(names[2], feedback=fb)}]
+            except BudgetExceeded as e:
+                stop = f"budget: {e}"
+                rec.event("budget_exhausted", limit=e.limit, detail=str(e), stage="loop")
+            outcome = {"status": "done" if stop == "pass" else "failed", "reason": stop}
+            if best:
+                rec.save_final(best[1], best[0].verilog)
+            b = best[0] if best else None
+            metrics = {
+                "task": task.name, "mode": mode, "model": role.model, "seed": seed,
+                "passed": stop == "pass", "stop": stop,
+                "iterations": len(reports) + no_code, "pass_iter": pass_iter,
+                "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
+                "wall_s": round(time.monotonic() - t0, 1),
+                "best_stage": b.stage if b else "no_code",
+                "best_pass_rate": b.sim.get("pass_rate", 0.0) if b else 0.0,
+                "stages": [r.stage for r in reports],
+                "no_code": no_code, "repeated_errors": repeated, "history_truncations": truncations,
+                "llm": budget.to_dict(),
+            }
+            rec.write_json("metrics.json", metrics)
+            return RunResult(rec.root, metrics, b, reports)
+        except RunInterrupted as e:
+            outcome = {"status": "interrupted", "reason": f"signal {e.signame}"}
+            raise
+        except BaseException as e:
+            outcome = {"status": "failed", "reason": "exception",
+                       "error": f"{type(e).__name__}: {e}"[:500]}
+            raise
+        finally:
+            if own_verifier and verifier is not None:
+                verifier.close()
+            write_res()

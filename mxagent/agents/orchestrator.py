@@ -25,6 +25,7 @@ from ..rag.embed import Embedder
 from ..rag.library import Component, Library
 from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
+from ..run.result import RunInterrupted, interruptible, llm_by_role, ppa_attempts, write_result
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
@@ -66,6 +67,7 @@ class Orchestrator:
         self.states: list[str] = []
         self._t_pass: float | None = None
         self._llm_at_pass: dict | None = None
+        self._iters_at_pass: int | None = None
         self.blocks: list[dict] = []
 
     # ------------------------------------------------------------ servizi
@@ -245,7 +247,29 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- run
     def run(self) -> RunResult:
-        cfg, t0 = self.cfg, time.monotonic()
+        """Esegue la run. ``result.json`` e l'evento ``end`` si scrivono SEMPRE, anche se
+        la run fallisce con un'eccezione o viene interrotta da un segnale."""
+        t0 = time.monotonic()
+        self._final: SolveResult | None = None
+        self._ppa_out: dict | None = None
+        self._outcome: dict = {"status": "failed", "reason": "run non terminata"}
+        with interruptible():
+            try:
+                return self._run(t0)
+            except RunInterrupted as e:
+                self._outcome = {"status": "interrupted", "reason": f"signal {e.signame}"}
+                self._state("INTERRUPTED", signal=e.signame)
+                raise
+            except BaseException as e:
+                self._outcome = {"status": "failed", "reason": "exception",
+                                 "error": f"{type(e).__name__}: {e}"[:500]}
+                self._state("FAILED", reason="exception", error=self._outcome["error"])
+                raise
+            finally:
+                self._write_result(t0)
+
+    def _run(self, t0: float) -> RunResult:
+        cfg = self.cfg
         self.rec.write_text("config.yaml", cfg.dump())
         coder = cfg.llm.roles["coder"].model
         digest = self.llm.digest(coder) if isinstance(self.llm, OllamaChat) else "scripted"
@@ -270,23 +294,27 @@ class Orchestrator:
                         break
                     solved.append((b, res))
                 else:
-                    final = self.integrate(plan, solved)
+                    final = self._final = self.integrate(plan, solved)
                     if not final.passed:
                         self._state("FALLBACK", reason="integrazione non riuscita")
                 if final is None or not final.passed:
-                    final = self.monolithic()
+                    final = self._final = self.monolithic()
             else:
-                final = self.monolithic(plan)
+                final = self._final = self.monolithic(plan)
             stop = final.stop
             if final.passed:
                 self._t_pass = time.monotonic()
                 self._llm_at_pass = self.budget.to_dict()  # confronto a pari budget (M6)
+                c = self.ctx.counters
+                self._iters_at_pass = c["candidates"] + c["no_code"]
             if final.passed and (self.cfg.agent.ppa or self.cfg.synth.backends):
-                ppa_out = self._ppa_safe(final)
+                ppa_out = self._ppa_out = self._ppa_safe(final)
             if final.passed and self.task.wrapper == "cvxif":
                 wrap_out = self._wrap(final)
         except BudgetExceeded as e:
             stop = f"budget: {e}"
+            self.rec.event("budget_exhausted", limit=e.limit, detail=str(e),
+                           stage=self.states[-1] if self.states else None)
         finally:
             if self.cfg.sim.sbt_mode == "client" and self.sbt_ws.is_dir():
                 _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
@@ -297,6 +325,9 @@ class Orchestrator:
             self._state("DONE")
             self._save(f"task:{self.task.name}", self.task.top, {}, self.task,
                        final.best.sources[f"{self.task.top}.scala"])
+        else:
+            self._state("FAILED", reason=stop)
+        self._outcome = {"status": "done" if passed else "failed", "reason": "pass" if passed else stop}
         best = final.best if final else None
         if best:
             self.rec.save_final(best.sources, best.report.verilog if best.report else [])
@@ -323,6 +354,41 @@ class Orchestrator:
         self.rec.write_json("metrics.json", metrics)
         return RunResult(self.rec.root, metrics, b, [a.report for a in (final.attempts if final else [])
                                                       if a.report])
+
+    def _write_result(self, t0: float) -> None:
+        """``result.json`` con quello che c'è, qualunque sia il modo in cui la run è finita."""
+        try:
+            final = self._final
+            best = final.best if final else None
+            b = best.report if best else None
+            sim = (b.sim if b else None) or {}
+            c, bud = self.ctx.counters, self.budget.to_dict()
+            out = self._ppa_out or {}
+            opt = out.get("optimizer") or {}
+            best_tag = opt.get("best_tag") or (b.tag if b else None)
+            result = {
+                "task": self.task.name, "mode": self.mode, "model": self.cfg.llm.roles["coder"].model,
+                "seed": self.seed, **self._outcome,
+                "passed": bool(final and final.passed),
+                "pass_rate": sim.get("pass_rate", 0.0), "n_vectors": sim.get("total"),
+                "best_stage": b.stage if b else "no_code", "best_candidate": best_tag,
+                "iterations": c["candidates"] + c["no_code"],
+                "iterations_to_pass": self._iters_at_pass,
+                "time_to_pass_s": round(self._t_pass - t0, 1) if self._t_pass else None,
+                "wall_s": round(time.monotonic() - t0, 1),
+                "llm_calls": bud["calls"], "tokens_in": bud["prompt_tokens"],
+                "tokens_out": bud["completion_tokens"], "llm_by_role": llm_by_role(self.rec.events),
+                "llm_to_pass": self._llm_at_pass,
+                "duplicates": c.get("duplicates", 0),
+                "ppa": None if not out else {
+                    "objective": opt.get("objective"), "gain": opt.get("gain"), "stop": opt.get("stop"),
+                    "attempts": ppa_attempts(out), "initial": out.get("initial"),
+                    "final": out.get("final"), "error": out.get("error")},
+                "states": self.states,
+            }
+            write_result(self.rec, result)
+        except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
+            self.rec.event("result_error", error=f"{type(e).__name__}: {e}")
 
 
 def final_backend_list(backends: list[str]) -> list[str]:

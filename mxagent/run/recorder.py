@@ -5,7 +5,8 @@
     trace.json      eventi in ordine: chiamate LLM (prompt, risposta, token) e verifiche
     candidates/NN/  sorgenti di ogni iterazione
     final/          sorgenti e Verilog del miglior candidato
-    metrics.json    metriche della run (dai tool, mai stimate)
+    metrics.json    metriche della run (dai tool, mai stimate); solo se la run arriva in fondo
+    result.json     esito SEMPRE presente: done | failed | interrupted (vedi run/result.py)
 """
 from __future__ import annotations
 

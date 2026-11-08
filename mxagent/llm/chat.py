@@ -23,7 +23,11 @@ from .ollama import OllamaClient
 
 
 class BudgetExceeded(RuntimeError):
-    pass
+    """Budget della run esaurito; ``limit`` = max_llm_calls | max_tokens | max_wall_s."""
+
+    def __init__(self, msg: str, limit: str = ""):
+        super().__init__(msg)
+        self.limit = limit
 
 
 @dataclass
@@ -47,11 +51,11 @@ class Budget:
 
     def check(self) -> None:
         if self.calls >= self.max_calls:
-            raise BudgetExceeded(f"chiamate LLM esaurite ({self.calls}/{self.max_calls})")
+            raise BudgetExceeded(f"chiamate LLM esaurite ({self.calls}/{self.max_calls})", "max_llm_calls")
         if self.tokens >= self.max_tokens:
-            raise BudgetExceeded(f"token esauriti ({self.tokens}/{self.max_tokens})")
+            raise BudgetExceeded(f"token esauriti ({self.tokens}/{self.max_tokens})", "max_tokens")
         if self.wall >= self.max_wall_s:
-            raise BudgetExceeded(f"tempo esaurito ({self.wall:.0f}/{self.max_wall_s:.0f}s)")
+            raise BudgetExceeded(f"tempo esaurito ({self.wall:.0f}/{self.max_wall_s:.0f}s)", "max_wall_s")
 
     def charge(self, r: "LLMResponse") -> None:
         self.calls += 1

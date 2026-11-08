@@ -288,6 +288,9 @@ class ModuleSolver:
             it += 1
         b = self.best
         passed = bool(b and b.report and b.report.passed)
+        self.ctx.rec.event("loop_stop", module=self.task.top, solver=self.kind,
+                           reason="pass" if passed else stop, iters_done=it, iters_max=self.max_iters,
+                           attempts=len(self.attempts))
         return SolveResult(self.task.top, passed, b, self.attempts, self.escapes,
                            "pass" if passed else stop)
 

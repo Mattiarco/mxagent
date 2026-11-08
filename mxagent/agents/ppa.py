@@ -46,6 +46,7 @@ class PPAResult:
     verilog: list[str]
     steps: list[PPAStep] = field(default_factory=list)
     stop: str = "iters"
+    best_tag: str | None = None  # tag della verifica del candidato accettato per ultimo
 
     @property
     def accepted(self) -> int:
@@ -62,6 +63,7 @@ class PPAResult:
                 "final": list(self.final) if self.final else None,
                 "objective_initial": obj(self.initial), "objective_final": obj(self.final),
                 "gain": gain, "tried": len(self.steps), "accepted": self.accepted, "stop": self.stop,
+                "best_tag": self.best_tag,
                 "steps": [s.to_dict() for s in self.steps]}
 
 
@@ -96,6 +98,7 @@ class PPAOptimizer:
         res = PPAResult(best, best, best_src, best_v)
         if best is None:
             res.stop = "no_primary_metric"
+            self._stop(res)
             return res
         history: list[str] = []
         for i in range(self.cfg.optimize_iters):
@@ -106,6 +109,7 @@ class PPAOptimizer:
                                   seed=self._seed, tag=f"ppa:{self.task.top}:{i}")
             except BudgetExceeded as e:
                 res.stop = f"budget: {e}"
+                self.ctx.rec.event("budget_exhausted", limit=e.limit, detail=str(e), stage="PPA")
                 break
             idea = re.search(r"IDEA:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
             idea_s = idea.group(1).strip().replace("\n", " ")[:200] if idea else "(no idea given)"
@@ -135,9 +139,19 @@ class PPAOptimizer:
                         step = PPAStep(i, "accepted" if ok else "rejected", why, p)
                         if ok:
                             best, best_src, best_v, best_rep = p, cand, list(vr.verilog), pr
+                            res.best_tag = vr.tag
             res.steps.append(step)
             history.append(f"attempt {i + 1}: {idea_s} -> {step.outcome}: {step.detail}")
             self.ctx.rec.event("ppa", module=self.task.top, n=i, outcome=step.outcome,
                                detail=step.detail, primary=list(step.primary) if step.primary else None)
+        else:
+            res.stop = "iters_exhausted"
         res.final, res.sources, res.verilog = best, best_src, best_v
+        self._stop(res)
         return res
+
+    def _stop(self, res: PPAResult) -> None:
+        """Perché il loop è finito (iterazioni esaurite, budget, metrica assente)."""
+        self.ctx.rec.event("ppa_stop", module=self.task.top, reason=res.stop,
+                           iters_done=len(res.steps), iters_max=self.cfg.optimize_iters,
+                           accepted=res.accepted)

@@ -176,6 +176,15 @@ def test_orchestrator_ppa_accepts_only_verified_improvements(tmp_path):
     assert ppa["scope"] == {"loop": ["generic"], "final": ["generic", "ecp5", "vivado"]}
     scope = [e for e in json.loads((r.run_dir / "trace.json").read_text()) if e["kind"] == "ppa_scope"]
     assert scope and scope[0]["loop_backends"] == ["generic"]
+    trace = json.loads((r.run_dir / "trace.json").read_text())
+    stop = [e for e in trace if e["kind"] == "ppa_stop"]
+    assert stop == [{**stop[0], "reason": "iters_exhausted", "iters_done": 4, "iters_max": 4,
+                     "accepted": 1}]
+    res = json.loads((r.run_dir / "result.json").read_text())
+    assert res["status"] == "done" and res["best_candidate"] == "E2M1Decode_ppa02"
+    assert res["ppa"]["attempts"] == {"total": 4, "accepted": 1, "rejected": 1, "functional_fail": 1,
+                                      "synth_fail": 0, "no_code": 1, "duplicate": 0}
+    assert res["llm_by_role"]["optimizer"]["calls"] == 4
     final = (r.run_dir / "final" / "E2M1Decode.scala").read_text()
     assert "70,10" in final
     assert "100,10" in (r.run_dir / "final_functional" / "E2M1Decode.scala").read_text()

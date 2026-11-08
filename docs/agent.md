@@ -21,9 +21,41 @@
                                   PPA ◀─────────────────────────────────────┘
                      (sintesi + PPA Optimizer, solo dopo il pass: docs/ppa.md)
                                     ▼
-                                  DONE
+                              DONE | FAILED
                      (componenti verificati salvati in library/)
 ```
+
+## Fine della run: `result.json`
+
+Ogni run termina con uno stato esplicito, scritto in un `try/finally`, e lascia
+sempre `result.json` e un ultimo evento `end` nel trace:
+
+| `status` | quando | `reason` |
+|---|---|---|
+| `done` | design bit-exact su tutti i vettori | `pass` |
+| `failed` | nessun design corretto | `max_iters`, `escape_stop`, `budget: ...` |
+| `failed` | eccezione non prevista | `exception` (dettaglio in `error`) |
+| `interrupted` | SIGINT, SIGTERM o SIGHUP (es. terminale chiuso senza tmux) | `signal SIGHUP` |
+
+`result.json` contiene:
+- task, modalità, modello, seed;
+- `passed`, `pass_rate`, `n_vectors` e `best_candidate` (tag della verifica);
+- iterazioni e tempo fino alla correttezza;
+- chiamate e token, in totale e per ruolo (`llm_by_role`, dagli eventi `llm` del trace);
+- le metriche PPA iniziali e finali per backend, il guadagno e i tentativi per esito
+  (accettati, rifiutati, falliti, duplicati).
+
+Le baseline scrivono lo stesso file, con `ppa: null`.
+
+Ogni uscita da un loop lascia un evento con il motivo:
+- `loop_stop` (solver): `pass`, `max_iters` o `escape_stop`, con `iters_done` e `iters_max`;
+- `ppa_stop` (optimizer): `iters_exhausted`, `budget: ...` o `no_primary_metric`;
+- `budget_exhausted`: `limit` è `max_llm_calls`, `max_tokens` o `max_wall_s`, e
+  `stage` è lo stato in cui il budget è finito.
+
+`metrics.json` resta la fonte per `mxagent report` e si scrive solo se la run
+arriva alla fine. Una run senza `metrics.json` ma con `result.json` in stato
+`interrupted` o `failed` è stata interrotta o è andata in errore.
 
 ## Solve di un modulo (`mxagent/agents/solver.py`)
 
