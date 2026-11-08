@@ -147,7 +147,7 @@ def fake_synth(verilog, task, c, work, backends=None):
 
 
 def code(top, tag):
-    return f"IDEA: try.\n```scala\nimport chisel3._\nclass {top} extends RawModule {{ {tag} }}\n```"
+    return f"IDEA: try.\n```scala\nimport chisel3._\nclass {top} extends RawModule {{ {tag}\n  val m = \"{tag}\" }}\n```"
 
 
 def test_orchestrator_ppa_accepts_only_verified_improvements(tmp_path):

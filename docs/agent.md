@@ -101,6 +101,24 @@ arriva alla fine. Una run senza `metrics.json` ma con `result.json` in stato
 
 Ogni chiamata è a turno singolo: il contesto non cresce con le iterazioni.
 
+### Candidati duplicati
+
+Ogni candidato verificato è registrato con l'hash del sorgente normalizzato:
+senza commenti, righe vuote, spazi ridondanti e righe `package`; il contenuto
+delle stringhe resta ([dedup.py](../mxagent/agents/dedup.py)).
+
+Un candidato identico a uno già visto nella run, che sia passato o fallito, non
+viene né compilato, né simulato, né sintetizzato:
+- nel trace compare un evento `duplicate` con `same_as` e l'esito noto, e
+  nessun evento `verify`;
+- si rigenera **una volta**, con temperatura +0.2 (al massimo 0.9), un seed
+  nuovo e una nota nel prompt; per l'optimizer la nota elenca anche le IDEA già
+  provate;
+- se anche la rigenerazione è un duplicato si passa oltre.
+
+Vale per best-of-N, per il loop di correzione e per il PPA Optimizer, dove
+compare come passo `duplicate`. Il totale è in `result.json["duplicates"]`.
+
 ## Decomposizione
 
 Il Planner sceglie blocchi dal catalogo (`mxagent/bench/subkernels.py`), ognuno con

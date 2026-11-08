@@ -204,6 +204,7 @@ class ScriptedChat:
         if self.budget:
             self.budget.check()
         self.requests.append({"messages": [dict(m) for m in messages], "model": model,
+                              "temperature": temperature,
                               "seed": seed, "format": format, "tag": tag})
         text = self.replies.pop(0) if self.replies else ""
         r = LLMResponse(text=text, model=model, prompt_tokens=sum(len(m["content"]) for m in messages) // 4,

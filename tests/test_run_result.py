@@ -26,7 +26,7 @@ def cfg(**over):
 
 
 def code(mark):
-    return f"```scala\nimport chisel3._\nclass E2M1Decode extends RawModule {{ {mark} }}\n```"
+    return f"```scala\nimport chisel3._\nclass E2M1Decode extends RawModule {{ {mark}\n  val m = \"{mark}\" }}\n```"
 
 
 class Verifier:
@@ -79,7 +79,7 @@ def test_result_on_success(tmp_path):
 
 
 def test_result_on_failure_with_reason(tmp_path):
-    o = run(tmp_path, [code("// bug")] * 3, **{"budget.max_fix_iters": 2})
+    o = run(tmp_path, [code(f"// bug {i}") for i in range(3)], **{"budget.max_fix_iters": 2})
     o.run()
     res, trace = load(o)
     assert res["status"] == "failed" and res["reason"] == "max_iters" and not res["passed"]
@@ -129,7 +129,7 @@ def test_real_sigint_becomes_interrupted(tmp_path):
 
 
 def test_budget_exhausted_is_recorded(tmp_path):
-    o = run(tmp_path, [code("// bug")] * 5, **{"budget.max_fix_iters": 4, "budget.max_llm_calls": 2})
+    o = run(tmp_path, [code(f"// bug {i}") for i in range(5)], **{"budget.max_fix_iters": 4, "budget.max_llm_calls": 2})
     o.run()
     res, trace = load(o)
     assert res["status"] == "failed" and res["reason"].startswith("budget")

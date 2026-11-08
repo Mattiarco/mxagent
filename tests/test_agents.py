@@ -52,7 +52,7 @@ class FakeVerifier:
 
 
 def code(top, mark="// ok"):
-    return f"```scala\nimport chisel3._\nclass {top} extends RawModule {{ {mark} }}\n```"
+    return f"```scala\nimport chisel3._\nclass {top} extends RawModule {{ {mark}\n  val m = \"{mark}\" }}\n```"
 
 
 def orch(task, c, replies, tmp, library=None):
@@ -121,7 +121,7 @@ def test_library_excludes_current_task(tmp_path):
 
 def test_escape_ladder_resample_escalate_stop(tmp_path):
     c = cfg(**{"agent.decompose": False, "budget.max_fix_iters": 12, "agent.escape_after_repeats": 1})
-    replies = [code("E2M1Decode", "syntax")] * 12
+    replies = [code("E2M1Decode", f"syntax {i}") for i in range(12)]
     o, llm, _ = orch(B01, c, replies, tmp_path)
     m = o.run().metrics
     assert not m["passed"] and m["stop"] == "escape_stop" and m["escalated"]

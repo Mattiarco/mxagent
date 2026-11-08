@@ -58,7 +58,7 @@ def synth(verilog, task, c, work, backends=None):
 
 
 def code(tag):
-    return f"IDEA: x.\n```scala\nimport chisel3._\nclass E2M1Decode extends RawModule {{ {tag} }}\n```"
+    return f"IDEA: x.\n```scala\nimport chisel3._\nclass E2M1Decode extends RawModule {{ {tag}\n  val m = \"{tag}\" }}\n```"
 
 
 def sha(p: Path) -> str:
@@ -117,7 +117,7 @@ def test_final_dir_without_ppa_gain(tmp_path):
 
 
 def test_failed_run_has_no_verified_final(tmp_path):
-    o, log = make(tmp_path, [code("// bug")] * 2, **{"budget.max_fix_iters": 1})
+    o, log = make(tmp_path, [code(f"// bug {i}") for i in range(2)], **{"budget.max_fix_iters": 1})
     r = o.run()
     assert "E2M1Decode_final" not in log
     assert not (r.run_dir / "final" / "selection.json").exists()
