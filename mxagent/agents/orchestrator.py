@@ -21,14 +21,15 @@ from pathlib import Path
 
 from ..bench.subkernels import CATALOG, block_task, catalog_text
 from ..bench.task import Task
-from ..config import Config
+from ..config import Config, effective_models, profile_label
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat, parse_json
 from ..rag.embed import Embedder
 from ..rag.library import Component, Library
 from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
-from ..run.result import RunInterrupted, interruptible, llm_by_role, ppa_attempts, write_result
+from ..run.result import (RunInterrupted, check_models, interruptible, llm_by_role, ppa_attempts,
+                          write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
@@ -50,8 +51,9 @@ class Orchestrator:
                  run_id: str | None = None):
         self.task, self.cfg, self.seed, self.mode = task, cfg, seed, mode
         self.budget = Budget(cfg.budget.max_llm_calls, cfg.budget.max_tokens, cfg.budget.max_wall_s)
-        coder = cfg.llm.roles["coder"].model
-        self.rec = Recorder(Path(runs_dir) / (run_id or new_run_id(task.name, mode, coder, seed)))
+        self.profile, self._profile_mismatch = profile_label(cfg, mode)
+        self.models_by_role = effective_models(cfg, mode)
+        self.rec = Recorder(Path(runs_dir) / (run_id or new_run_id(task.name, mode, self.profile, seed)))
         if llm is None:
             llm = OllamaChat(cfg.llm.host, cfg.llm.cache_dir, cfg.llm.timeout_s, cfg.llm.max_retries,
                              budget=self.budget)
@@ -345,10 +347,12 @@ class Orchestrator:
         coder = cfg.llm.roles["coder"].model
         digest = self.llm.digest(coder) if isinstance(self.llm, OllamaChat) else "scripted"
         self.rec.meta(task=self.task.name, mode=self.mode, seed=self.seed, model=coder,
+                      model_profile=self.profile, models_by_role=self.models_by_role,
                       model_digest=digest, roles={k: v.model_dump() for k, v in cfg.llm.roles.items()},
                       agent=cfg.agent.model_dump(), prompts=prompts.fingerprint(*PROMPTS),
                       library_size=len(self.library) if self.library else 0,
                       numerics=self.task.numerics_obj.to_dict())
+        check_models(self.rec, self.profile, self._profile_mismatch)
         final: SolveResult | None = None
         plan = Plan("monolithic")
         stop, time_to_pass = "max_iters", None
@@ -441,6 +445,7 @@ class Orchestrator:
             best_tag = self._selected or opt.get("best_tag") or (b.tag if b else None)
             result = {
                 "task": self.task.name, "mode": self.mode, "model": self.cfg.llm.roles["coder"].model,
+                "model_profile": self.profile, "models_by_role": self.models_by_role,
                 "seed": self.seed, **self._outcome,
                 "passed": bool(final and final.passed),
                 "pass_rate": sim.get("pass_rate", 0.0), "n_vectors": sim.get("total"),

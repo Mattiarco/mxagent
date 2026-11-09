@@ -27,8 +27,9 @@ from .. import __version__
 from .. import versions as V
 
 
-def new_run_id(task: str, mode: str, model: str, seed: int) -> str:
-    m = re.sub(r"[^\w.-]", "-", model)
+def new_run_id(task: str, mode: str, profile: str, seed: int) -> str:
+    """``<data>_<task>_<modalità>_<profilo di modello>_s<seed>`` (profilo: all14b, mixed, ...)."""
+    m = re.sub(r"[^\w.-]", "-", profile)
     return f"{datetime.now():%Y%m%d-%H%M%S}_{task}_{mode}_{m}_s{seed}"
 
 

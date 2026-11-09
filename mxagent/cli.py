@@ -127,15 +127,21 @@ def cmd_run(a: argparse.Namespace) -> int:
 
     if a.mode not in (*MODES, "full"):
         raise SystemExit(f"modalità {a.mode}: disponibili {MODES + ('full',)}")
+    from .config import LLM_ROLES
+
     over = {}
-    if a.model:
-        over = {f"llm.roles.{r}.model": a.model
-                for r in ("planner", "coder", "fixer", "reflector", "escalate")}
+    if a.model and a.model_profile:
+        raise SystemExit("--model e --model-profile sono alternativi")
+    if a.model:  # scorciatoia per un profilo uniforme: tutti i ruoli LLM, embed escluso
+        over = {f"llm.roles.{r}.model": a.model for r in LLM_ROLES}
     for kv in a.set or []:
         k, v = kv.split("=", 1)
         import yaml as _yaml
         over[k] = _yaml.safe_load(v)
-    cfg = load_config(a.config, over)
+    try:
+        cfg = load_config(a.config, over, profile=a.model_profile)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     task = load_task(a.task)
     runs = Path(a.runs_dir or os.environ.get("MXAGENT_RUNS") or cfg.runs_dir)
     if a.mode == "full":
@@ -320,7 +326,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--mode", default="full", help="full | baseline-a | baseline-b")
     rp.add_argument("--set", nargs="*", metavar="KEY=VAL",
                     help="override della config, es. agent.decompose=false (ablation)")
-    rp.add_argument("--model", default=None, help="sovrascrive il modello di tutti i ruoli")
+    rp.add_argument("--model", default=None,
+                    help="un solo modello per tutti i ruoli LLM (embed escluso)")
+    rp.add_argument("--model-profile", default=None,
+                    help="profilo di modello della config: all14b | all32b | mixed")
     rp.add_argument("--config", default="configs/default.yaml")
     rp.add_argument("--seed", type=int, default=0)
     rp.add_argument("--runs-dir", default=None, help="default $MXAGENT_RUNS o runs_dir della config")

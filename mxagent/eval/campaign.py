@@ -23,10 +23,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..config import LLM_ROLES
 from ..run.baselines import MODES
 
 ALL_MODES = (*MODES, "full")
-LLM_ROLES = ("planner", "coder", "fixer", "reflector", "escalate", "optimizer")
 
 
 class _Strict(BaseModel):
@@ -34,11 +34,13 @@ class _Strict(BaseModel):
 
 
 class ModelSet(_Strict):
-    """``all`` assegna un modello a ogni ruolo; ``roles`` li sovrascrive uno per uno.
+    """``profile`` usa un profilo della config (``llm.profiles``: all14b, all32b, mixed);
+    ``all`` assegna un modello a ogni ruolo; ``roles`` li sovrascrive uno per uno.
 
     Le baseline usano un solo modello: ``baseline`` (default: quello del coder).
     """
 
+    profile: str | None = None
     all: str | None = None
     roles: dict[str, str] = {}
     baseline: str | None = None
@@ -53,15 +55,17 @@ class ModelSet(_Strict):
 
     @model_validator(mode="after")
     def _some(self) -> "ModelSet":
-        if not self.all and not self.roles:
-            raise ValueError("insieme di modelli vuoto: serve all o roles")
+        if not self.all and not self.roles and not self.profile:
+            raise ValueError("insieme di modelli vuoto: serve profile, all o roles")
         return self
 
     def overrides(self, mode: str) -> dict[str, Any]:
+        prof = {"llm.profile": self.profile} if self.profile else {}
         if mode != "full":
             m = self.baseline or self.roles.get("coder") or self.all
-            return {"llm.roles.coder.model": m}
-        out = {f"llm.roles.{r}.model": self.all for r in LLM_ROLES} if self.all else {}
+            return {**prof, **({"llm.roles.coder.model": m} if m else {})}
+        out = dict(prof)
+        out.update({f"llm.roles.{r}.model": self.all for r in LLM_ROLES} if self.all else {})
         out.update({f"llm.roles.{r}.model": m for r, m in self.roles.items()})
         return out
 

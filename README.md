@@ -79,6 +79,7 @@ mxagent golden dot --a 2 --b 7 --a-scale 130    # dot di due blocchi -> FP32
 mxagent golden quant --x 1.0,-2.5,7.0,...       # FP32 -> blocco MXFP4
 mxagent verify --task benchmarks/b02_e2m1_mul  # verifica il riferimento (o --sources X.scala)
 mxagent run --task benchmarks/b01_e2m1_decode --mode baseline-b --model qwen2.5-coder:7b --seed 0
+mxagent run --task benchmarks/b01_e2m1_decode --model-profile all14b   # 14B per tutti i ruoli
 mxagent synth --task benchmarks/b05_mxfp4_dot32  # PPA del riferimento (verificato prima)
 mxagent synth --run runs/<id> --backends generic,ecp5,nextpnr   # PPA del design di una run
 mxagent wrap                                    # coprocessore CV-X-IF del MAC (b08) e test di protocollo
@@ -107,6 +108,12 @@ Ogni `mxagent run` produce `runs/<id>/` (o `$MXAGENT_RUNS/<id>/`):
 
 Le risposte del modello sono in cache (`.cache/llm`, chiave = modello + digest +
 messaggi + opzioni): una run rieseguita con gli stessi parametri è identica.
+
+Modelli: `--model-profile all14b | all32b | mixed` imposta il modello di tutti i
+ruoli LLM (`embed` escluso) secondo `llm.profiles` della config; `--model X` è la
+scorciatoia per un profilo uniforme. Il nome della run e `meta.json` riportano il
+profilo (`..._full_all14b_s0`), `result.json` i modelli effettivi in `models_by_role`.
+La config di default senza profilo è `mixed` (14B per coder/fixer, 32B per gli altri).
 
 Modalità: `full` (sistema completo, [docs/agent.md](docs/agent.md)), `baseline-a`
 (single-shot, prompt ingenuo) e `baseline-b` (loop generico con log grezzi e storia

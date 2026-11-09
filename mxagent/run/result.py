@@ -14,6 +14,7 @@ interrotta dall'esterno.
 from __future__ import annotations
 
 import signal
+import sys
 import threading
 from collections import Counter
 from collections.abc import Iterator
@@ -86,6 +87,16 @@ def ppa_attempts(ppa_out: dict | None) -> dict[str, int]:
     c = Counter(s.get("outcome") for s in steps)
     keys = ("accepted", "rejected", "functional_fail", "synth_fail", "no_code", "duplicate")
     return {"total": len(steps), **{k: c.get(k, 0) for k in keys}}
+
+
+def check_models(rec: Recorder, label: str, mismatches: dict[str, dict[str, str]]) -> None:
+    """All'avvio: se il profilo dichiarato (nome della run) non corrisponde ai modelli
+    effettivi dei ruoli, warning su stderr ed evento ``model_profile_mismatch``."""
+    if not mismatches:
+        return
+    roles = ", ".join(f"{r}={d['actual']} (atteso {d['expected']})" for r, d in mismatches.items())
+    print(f"WARNING: il profilo '{label}' non corrisponde ai ruoli: {roles}", file=sys.stderr)
+    rec.event("model_profile_mismatch", profile=label, mismatches=mismatches)
 
 
 def write_result(rec: Recorder, result: dict[str, Any]) -> None:

@@ -20,12 +20,12 @@ from typing import Any
 from ..agents import prompts
 from ..agents.extract import extract_scala
 from ..bench.task import Task
-from ..config import Config, ModelRole
+from ..config import Config, ModelRole, profile_label
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat
 from ..verify.verifier import VerifyReport, Verifier
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
-from .result import RunInterrupted, interruptible, llm_by_role, write_result
+from .result import RunInterrupted, check_models, interruptible, llm_by_role, write_result
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b")
@@ -75,7 +75,11 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
              run_id: str | None = None) -> RunResult:
     st = settings_for(mode, cfg)
     budget = budget or Budget(cfg.budget.max_llm_calls, cfg.budget.max_tokens, cfg.budget.max_wall_s)
-    run_id = run_id or new_run_id(task.name, mode, role.model, seed)
+    profile, mism = profile_label(cfg, mode)
+    if role.model != cfg.llm.roles["coder"].model:  # modello passato a mano, diverso dalla config
+        profile, mism = f"all-{role.model}", {}
+    models_by_role = {"coder": role.model}
+    run_id = run_id or new_run_id(task.name, mode, profile, seed)
     rec = Recorder(Path(runs_dir) / run_id)
     rec.write_text("config.yaml", cfg.dump())
     names = [f"{st.prompt_set}/system", f"{st.prompt_set}/task", f"{st.prompt_set}/fix"]
@@ -86,9 +90,11 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
         llm.budget = budget  # type: ignore[attr-defined]
     budget = getattr(llm, "budget", None) or budget
     digest = llm.digest(role.model) if isinstance(llm, OllamaChat) else "scripted"
-    rec.meta(task=task.name, mode=mode, seed=seed, model=role.model, model_digest=digest,
+    rec.meta(task=task.name, mode=mode, seed=seed, model=role.model, model_profile=profile,
+             models_by_role=models_by_role, model_digest=digest,
              role=role.model_dump(), prompts=prompts.fingerprint(*names),
              settings=st.__dict__, numerics=task.numerics_obj.to_dict())
+    check_models(rec, profile, mism)
 
     own_verifier = False
     if verify_fn is None:
@@ -120,7 +126,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
         bud = budget.to_dict()
         try:
             write_result(rec, {
-                "task": task.name, "mode": mode, "model": role.model, "seed": seed, **outcome,
+                "task": task.name, "mode": mode, "model": role.model, "model_profile": profile,
+                "models_by_role": models_by_role, "seed": seed, **outcome,
                 "passed": stop == "pass", "pass_rate": sim.get("pass_rate", 0.0),
                 "n_vectors": sim.get("total"), "best_stage": b.stage if b else "no_code",
                 "best_candidate": b.tag if b else None,

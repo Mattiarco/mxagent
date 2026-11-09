@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .formats.numerics import Numerics
 
 
+#: ruoli LLM generativi (``embed`` è a parte: resta sempre il modello di embedding)
+LLM_ROLES = ("planner", "coder", "fixer", "reflector", "escalate", "optimizer")
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -31,6 +35,10 @@ class LLMConfig(_Strict):
     max_retries: int = 2
     cache_dir: str = ".cache/llm"
     roles: dict[str, ModelRole]
+    #: profili di modello: nome -> {ruolo: modello}, con ``all`` per tutti i ruoli LLM
+    profiles: dict[str, dict[str, str]] = {}
+    #: profilo applicato (``--model-profile``); None = ruoli come scritti nella config
+    profile: str | None = None
 
     @field_validator("roles")
     @classmethod
@@ -38,6 +46,15 @@ class LLMConfig(_Strict):
         missing = {"planner", "coder", "fixer", "reflector"} - set(v)
         if missing:
             raise ValueError(f"ruoli LLM mancanti: {sorted(missing)}")
+        return v
+
+    @field_validator("profiles")
+    @classmethod
+    def _profile_roles(cls, v: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        for name, p in v.items():
+            bad = set(p) - {*LLM_ROLES, "all"}
+            if bad:
+                raise ValueError(f"profilo {name}: ruoli sconosciuti {sorted(bad)}")
         return v
 
     def models(self) -> list[str]:
@@ -168,9 +185,89 @@ class Config(_Strict):
         return yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False, allow_unicode=True)
 
 
-def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> Config:
+def profile_roles(profiles: dict[str, dict[str, str]], name: str) -> dict[str, str]:
+    """Modello di ogni ruolo LLM secondo il profilo ``name`` (``embed`` escluso)."""
+    if name not in profiles:
+        raise ValueError(f"profilo di modello sconosciuto: {name}; disponibili {sorted(profiles)}")
+    p = profiles[name]
+    out = {r: p.get(r, p.get("all")) for r in LLM_ROLES}
+    missing = [r for r, m in out.items() if not m]
+    if missing:
+        raise ValueError(f"profilo {name}: nessun modello per {missing} (usa 'all' o elencali)")
+    return out  # type: ignore[return-value]
+
+
+def apply_profile(data: dict[str, Any], name: str) -> None:
+    """Imposta nel YAML grezzo il modello di tutti i ruoli LLM secondo il profilo.
+
+    Temperature e contesto restano quelli del ruolo; un ruolo assente (es. ``optimizer``)
+    viene creato con le impostazioni del ``reflector``."""
+    llm = data.setdefault("llm", {})
+    roles = llm.setdefault("roles", {})
+    for r, m in profile_roles(llm.get("profiles") or {}, name).items():
+        base = roles.get(r) or dict(roles.get("reflector") or {})
+        roles[r] = {**base, "model": m}
+    llm["profile"] = name
+
+
+def effective_models(cfg: "Config", mode: str = "full") -> dict[str, str]:
+    """Modello che ogni ruolo usa davvero nella run (``models_by_role``).
+
+    Le baseline usano solo il ``coder``; con ``agent.routing: false`` tutti i ruoli LLM
+    del sistema completo usano il coder; ``optimizer`` assente ripiega sul reflector."""
+    roles = cfg.llm.roles
+    if mode != "full":
+        return {"coder": roles["coder"].model}
+    out = {}
+    for r in LLM_ROLES:
+        if not cfg.agent.routing:
+            out[r] = roles["coder"].model
+        elif r in roles:
+            out[r] = roles[r].model
+        elif r == "optimizer":
+            out[r] = roles["reflector"].model
+        elif r == "escalate":
+            out[r] = roles["planner"].model
+    if "embed" in roles:
+        out["embed"] = roles["embed"].model
+    return out
+
+
+def profile_label(cfg: "Config", mode: str = "full") -> tuple[str, dict[str, dict[str, str]]]:
+    """Etichetta del profilo (nome della run, meta.json) e differenze rispetto al profilo
+    dichiarato.
+
+    Con un profilo dichiarato l'etichetta è quel nome e ``mismatches`` elenca i ruoli
+    che usano un altro modello (es. un ``--set`` successivo). Senza profilo l'etichetta
+    è il primo profilo della config che coincide coi ruoli effettivi, ``all-<modello>``
+    se tutti i ruoli usano lo stesso modello, altrimenti ``custom``."""
+    eff = {r: m for r, m in effective_models(cfg, mode).items() if r != "embed"}
+    profiles = cfg.llm.profiles
+    if cfg.llm.profile:
+        exp = profile_roles(profiles, cfg.llm.profile)
+        mism = {r: {"expected": exp[r], "actual": m} for r, m in eff.items() if exp[r] != m}
+        return cfg.llm.profile, mism
+    for name in profiles:
+        try:
+            exp = profile_roles(profiles, name)
+        except ValueError:
+            continue
+        if all(exp[r] == m for r, m in eff.items()):
+            return name, {}
+    models = set(eff.values())
+    return (f"all-{models.pop()}" if len(models) == 1 else "custom"), {}
+
+
+def load_config(path: str | Path, overrides: dict[str, Any] | None = None,
+                profile: str | None = None) -> Config:
+    """Config YAML + profilo di modello + override puntuali (in quest'ordine: un
+    ``--set llm.roles.X.model=...`` vince sul profilo, e viene segnalato come mismatch)."""
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    for dotted, value in (overrides or {}).items():
+    overrides = dict(overrides or {})
+    name = profile or overrides.pop("llm.profile", None) or (data.get("llm") or {}).get("profile")
+    if name:
+        apply_profile(data, name)
+    for dotted, value in overrides.items():
         cur = data
         *parents, last = dotted.split(".")
         for p in parents:
