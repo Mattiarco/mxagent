@@ -161,3 +161,24 @@ def test_normalized_sv_hash_ignores_firtool_locators(tmp_path):
 def test_normalize_sv_keeps_strings():
     s = 'initial $display("a // not a comment /* x */"); // gone\n'
     assert normalize_sv(s) == 'initial $display("a // not a comment /* x */");\n'
+
+
+def test_candidate_dirs_match_selection_ids(tmp_path):
+    o, log = make(tmp_path, [code("// bug"), code("// ok 100,10"),
+                             code("// ok 120,10"), code("// ok 70,10")],
+                  **{"budget.max_fix_iters": 2})
+    r = o.run()
+    sel = json.loads((r.run_dir / "final" / "selection.json").read_text())
+    marks = {"E2M1Decode_00": "// bug", "E2M1Decode_01": "100,10",
+             "E2M1Decode_ppa00": "120,10", "E2M1Decode_ppa01": "70,10"}
+    assert [c["id"] for c in sel["candidates"]] == list(marks)
+    for c in sel["candidates"]:
+        d = r.run_dir / "candidates" / c["id"]
+        assert marks[c["id"]] in (d / "E2M1Decode.scala").read_text(), c["id"]
+        meta = json.loads((d / "meta.json").read_text())
+        assert meta["id"] == c["id"] and meta["origin"] == c["origin"]
+        assert meta["phase"] == ("ppa" if c["phase"] == "ppa" else "monolithic")
+        assert meta["pass_rate"] == (0.5 if c["id"] == "E2M1Decode_00" else 1.0)
+        assert meta["stage"] == ("sim" if c["id"] == "E2M1Decode_00" else "pass")
+    # nessuna cartella numerata alla vecchia maniera
+    assert sorted(p.name for p in (r.run_dir / "candidates").iterdir()) == sorted(marks)

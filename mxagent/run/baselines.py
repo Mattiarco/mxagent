@@ -157,9 +157,13 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                         rec.event("verify", iter=it, stage="no_code", passed=False)
                     else:
                         sources = {f"{task.top}.scala": code}
-                        rec.save_candidate(it, sources)
                         rep = verify_fn(sources, f"it{it:02d}")
                         reports.append(rep)
+                        rec.save_candidate(rep.tag, sources, {
+                            "phase": mode, "module": task.top, "n": it,
+                            "origin": "gen" if it == 0 else "fix", "stage": rep.stage,
+                            "passed": rep.passed, "pass_rate": (rep.sim or {}).get("pass_rate"),
+                            "n_vectors": (rep.sim or {}).get("total")})
                         rec.event("verify", iter=it, stage=rep.stage, passed=rep.passed,
                                   score=list(rep.score), seconds=rep.seconds, feedback=rep.feedback,
                                   error_keys=rep.error_keys)

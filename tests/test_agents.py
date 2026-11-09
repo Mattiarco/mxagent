@@ -97,6 +97,9 @@ def test_decompose_integrate_and_library_reuse(tmp_path):
     integ = llm.requests[-1]["messages"][1]["content"]
     assert "VERIFIED SUBMODULES" in integ and "FixedToFP32" in integ and "y: Output(UInt(32.W))" in integ
     assert len(lib) == 5  # 4 blocchi + il top
+    # candidates/<id>: blocchi col nome del modulo, top integrato con prefisso "int"
+    cands = sorted(d.name for d in (o.rec.root / "candidates").iterdir())
+    assert cands == ["AdderTree_00", "E2M1Mul_00", "E8M0Pair_00", "FixedToFP32_00", "MXFP4Dot32_int00"]
 
     # seconda run su un altro task (anti-leakage: origin diverso): i blocchi si riusano senza LLM
     other = B05.model_copy(update={"name": "b05_variant"})

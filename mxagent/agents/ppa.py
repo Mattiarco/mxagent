@@ -168,7 +168,6 @@ class PPAOptimizer:
         vr = self.verifier.verify(cand, tag)
         vlog: list[str] = []
         pr: PPAReport | None = None
-        self.ctx.rec.write_text(f"candidates/ppa{i:02d}/{top_file}", code)
         if not vr.passed:
             lines = [ln.strip() for ln in vr.feedback.splitlines() if ln.strip()]
             first = " ".join(lines[:2])[:240]  # intestazione + primo errore
@@ -184,6 +183,11 @@ class PPAOptimizer:
                 step = PPAStep(i, "accepted" if ok else "rejected", why, p, tag=tag)
                 vlog = list(vr.verilog)
         self.ctx.remember(cand, tag, step.outcome)
+        self.ctx.rec.save_candidate(tag, {top_file: code}, {
+            "phase": "ppa", "module": self.task.top, "n": i, "origin": "ppa", "stage": vr.stage,
+            "passed": vr.passed, "pass_rate": (vr.sim or {}).get("pass_rate"),
+            "n_vectors": (vr.sim or {}).get("total"), "outcome": step.outcome,
+            "primary": list(step.primary) if step.primary else None})
         return step, vlog, pr
 
     def _stop(self, res: PPAResult) -> None:

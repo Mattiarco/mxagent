@@ -210,17 +210,26 @@ class ModuleSolver:
                           outcome=dup["outcome"])
             return None
         ctx.counters["candidates"] += 1
-        rep = self.verifier.verify(sources, f"{self.task.top}_{n:02d}")
+        rep = self.verifier.verify(sources, self._tag(n))
         ctx.remember(sources, rep.tag, "pass" if rep.passed else rep.stage)
         a = Attempt(rep, sources, origin, diagnosis)
         self.attempts.append(a)
-        ctx.rec.save_candidate(ctx.counters["candidates"], {f"{self.task.top}.scala": code})
+        ctx.rec.save_candidate(rep.tag, {f"{self.task.top}.scala": code}, {
+            "phase": self.kind, "module": self.task.top, "n": n, "origin": origin,
+            "stage": rep.stage, "passed": rep.passed, "pass_rate": (rep.sim or {}).get("pass_rate"),
+            "n_vectors": (rep.sim or {}).get("total"), "sanitized": fixes})
         ctx.rec.event("verify", module=self.task.top, n=n, origin=origin, stage=rep.stage,
                       passed=rep.passed, score=list(rep.score), sanitized=fixes,
                       error_keys=rep.error_keys, feedback=rep.feedback[:3000],
                       seconds=rep.seconds)
         self.memory.append(self._summary(a, n))
         return a
+
+    def _tag(self, n: int) -> str:
+        """Id del candidato (tag della verifica e cartella ``candidates/<id>``). Il top
+        integrato ha un prefisso suo: in una run con ripiego sul monolitico i due
+        solver dello stesso modulo non devono produrre id uguali."""
+        return f"{self.task.top}_{'int' if self.kind == 'integrate' else ''}{n:02d}"
 
     def _summary(self, a: Attempt, n: int) -> str:
         r = a.report

@@ -47,7 +47,7 @@ def test_baseline_b_fixes_with_raw_feedback(tmp_path):
     assert "E2M1Decode" in first and "FlatIO" in first and "Numeric semantics" not in first
     d = res.run_dir
     for f in ("config.yaml", "meta.json", "trace.json", "metrics.json", "final/E2M1Decode.scala",
-              "candidates/00/E2M1Decode.scala"):
+              "candidates/it00/E2M1Decode.scala", "candidates/it00/meta.json"):
         assert (d / f).is_file(), f
     meta = json.loads((d / "meta.json").read_text())
     assert meta["mode"] == "baseline-b" and len(meta["prompts"]) == 3

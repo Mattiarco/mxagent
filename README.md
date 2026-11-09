@@ -99,7 +99,7 @@ Ogni `mxagent run` produce `runs/<id>/` (o `$MXAGENT_RUNS/<id>/`):
 | `config.yaml` | configurazione effettiva |
 | `meta.json` | task, modalità, seed, digest del modello, hash dei prompt, versioni toolchain |
 | `trace.json` | ogni chiamata LLM (prompt, risposta, token, tempo) e ogni verifica |
-| `candidates/NN/` | sorgenti di ogni iterazione |
+| `candidates/<id>/` | sorgenti di ogni candidato verificato e `meta.json` (id, fase, origine, stadio, pass rate); `<id>` è quello di trace e `selection.json` (`E2M1Decode_01`, `E2M1Decode_ppa00`, `it03`) |
 | `final/` | miglior candidato: sorgenti Chisel e Verilog emesso |
 | `verify/` | log e `report.json` del verifier per iterazione |
 | `metrics.json` | esito, iterazioni, tempo fino alla correttezza, token, errori ripetuti, PPA |
