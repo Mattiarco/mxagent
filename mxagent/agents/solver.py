@@ -33,9 +33,11 @@ class AgentContext:
     library: Library | None
     seed: int
     task_name: str  # task della run (anti-leakage della libreria)
+    #: candidates = candidati verificati (compilati e simulati; esclusi no_code e duplicati);
+    #: reflect_rounds = cicli di correzione dopo la generazione iniziale (reflect o resample)
     counters: dict[str, int] = field(default_factory=lambda: {"candidates": 0, "sanitized": 0,
                                                               "kb_hits": 0, "no_code": 0,
-                                                              "duplicates": 0})
+                                                              "duplicates": 0, "reflect_rounds": 0})
     escalated: bool = False
     #: candidati già verificati in questa run: hash normalizzato -> {tag, outcome}
     seen: dict[str, dict] = field(default_factory=dict)
@@ -330,14 +332,16 @@ class ModuleSolver:
                     if action == "resample":
                         self.generate(cfg.agent.best_of_n, temp_boost=0.4, origin="resample")
                         it += 1
+                        self.ctx.counters["reflect_rounds"] += 1
                         continue
             self.reflect()
             it += 1
+            self.ctx.counters["reflect_rounds"] += 1
         b = self.best
         passed = bool(b and b.report and b.report.passed)
         self.ctx.rec.event("loop_stop", module=self.task.top, solver=self.kind,
-                           reason="pass" if passed else stop, iters_done=it, iters_max=self.max_iters,
-                           attempts=len(self.attempts))
+                           reason="pass" if passed else stop, reflect_rounds=it,
+                           max_reflect_rounds=self.max_iters, attempts=len(self.attempts))
         return SolveResult(self.task.top, passed, b, self.attempts, self.escapes,
                            "pass" if passed else stop)
 

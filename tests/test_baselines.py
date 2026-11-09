@@ -35,7 +35,7 @@ def test_baseline_b_fixes_with_raw_feedback(tmp_path):
     res = run_loop(TASK, CFG, "baseline-b", seed=5, role=ROLE, runs_dir=tmp_path, llm=llm,
                    verify_fn=fake_verify)
     m = res.metrics
-    assert m["passed"] and m["pass_iter"] == 3 and m["iterations"] == 3 and m["repeated_errors"] == 1
+    assert m["passed"] and m["candidates_to_pass"] == 3 and m["reflect_rounds"] == 2 and m["iterations"] == 3 and m["repeated_errors"] == 1
     # il feedback dato all'LLM è quello grezzo, mai quello strutturato
     last_user = llm.requests[-1]["messages"][-1]["content"]
     assert "TEST FAILED: 2 of 16" in last_user and "STRUCTURED" not in last_user

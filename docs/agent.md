@@ -69,7 +69,7 @@ sempre `result.json` e un ultimo evento `end` nel trace:
 `result.json` contiene:
 - task, modalità, modello, seed;
 - `passed`, `pass_rate`, `n_vectors` e `best_candidate` (tag della verifica);
-- iterazioni e tempo fino alla correttezza;
+- `candidates_to_pass`, `reflect_rounds` (definizioni nel README) e tempo fino alla correttezza;
 - chiamate e token, in totale e per ruolo (`llm_by_role`, dagli eventi `llm` del trace);
 - le metriche PPA iniziali e finali per backend, il guadagno e i tentativi per esito
   (accettati, rifiutati, falliti, duplicati).
@@ -77,7 +77,8 @@ sempre `result.json` e un ultimo evento `end` nel trace:
 Le baseline scrivono lo stesso file, con `ppa: null`.
 
 Ogni uscita da un loop lascia un evento con il motivo:
-- `loop_stop` (solver): `pass`, `max_iters` o `escape_stop`, con `iters_done` e `iters_max`;
+- `loop_stop` (solver): `pass`, `max_iters` o `escape_stop`, con `reflect_rounds` e
+  `max_reflect_rounds`;
 - `ppa_stop` (optimizer): `iters_exhausted`, `budget: ...` o `no_primary_metric`;
 - `budget_exhausted`: `limit` è `max_llm_calls`, `max_tokens` o `max_wall_s`, e
   `stage` è lo stato in cui il budget è finito.

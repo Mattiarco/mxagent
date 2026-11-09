@@ -114,7 +114,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     t0 = time.monotonic()
     reports: list[VerifyReport] = []
     best: tuple[VerifyReport, dict[str, str]] | None = None
-    stop, pass_iter, time_to_pass = "max_iters", None, None
+    stop, cands_to_pass, time_to_pass = "max_iters", None, None
+    rounds = 0  # cicli di correzione: chiamate dopo la prima, ognuna col feedback della precedente
     no_code = repeated = truncations = 0
     prev_keys: list[str] | None = None
     outcome: dict = {"status": "failed", "reason": "run non terminata"}
@@ -131,7 +132,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "passed": stop == "pass", "pass_rate": sim.get("pass_rate", 0.0),
                 "n_vectors": sim.get("total"), "best_stage": b.stage if b else "no_code",
                 "best_candidate": b.tag if b else None,
-                "iterations": len(reports) + no_code, "iterations_to_pass": pass_iter,
+                "candidates": len(reports), "no_code": no_code,
+                "candidates_to_pass": cands_to_pass, "reflect_rounds": rounds,
                 "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
                 "wall_s": round(time.monotonic() - t0, 1), "llm_calls": bud["calls"],
                 "tokens_in": bud["prompt_tokens"], "tokens_out": bud["completion_tokens"],
@@ -143,6 +145,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
         try:
             try:
                 for it in range(st.max_fix_iters + 1):
+                    rounds = it
                     truncations += _fit_history(messages, role.num_ctx, role.num_predict)
                     r = llm.chat(messages, model=role.model, temperature=role.temperature,
                                  num_ctx=role.num_ctx, num_predict=role.num_predict,
@@ -173,7 +176,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                         if best is None or rep.score > best[0].score:
                             best = (rep, sources)
                         if rep.passed:
-                            stop, pass_iter, time_to_pass = "pass", it + 1, time.monotonic() - t0
+                            stop, cands_to_pass, time_to_pass = "pass", len(reports), time.monotonic() - t0
                             break
                         fb = rep.feedback_raw if st.feedback == "raw" else rep.feedback
                     if it == st.max_fix_iters:
@@ -190,7 +193,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             metrics = {
                 "task": task.name, "mode": mode, "model": role.model, "seed": seed,
                 "passed": stop == "pass", "stop": stop,
-                "iterations": len(reports) + no_code, "pass_iter": pass_iter,
+                "iterations": len(reports) + no_code, "candidates_to_pass": cands_to_pass,
+                "reflect_rounds": rounds,
                 "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
                 "wall_s": round(time.monotonic() - t0, 1),
                 "best_stage": b.stage if b else "no_code",

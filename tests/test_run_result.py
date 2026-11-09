@@ -67,7 +67,8 @@ def test_result_on_success(tmp_path):
     res, trace = load(o)
     assert res["status"] == "done" and res["reason"] == "pass" and res["passed"]
     assert res["pass_rate"] == 1.0 and res["n_vectors"] == 16
-    assert res["iterations_to_pass"] == 2 and res["time_to_pass_s"] is not None
+    assert res["candidates_to_pass"] == 2 and res["reflect_rounds"] == 1
+    assert res["time_to_pass_s"] is not None
     assert res["best_candidate"] == "E2M1Decode_01"
     assert res["llm_calls"] == 2 and res["tokens_in"] > 0 and res["tokens_out"] > 0
     assert set(res["llm_by_role"]) == {"coder", "reflector"}
@@ -75,7 +76,8 @@ def test_result_on_success(tmp_path):
     assert trace[-1]["kind"] == "end" and trace[-1]["status"] == "done"
     assert o.states[-1] == "DONE"
     stops = [e for e in trace if e["kind"] == "loop_stop"]
-    assert stops and stops[0]["reason"] == "pass" and stops[0]["iters_max"] == 2
+    assert stops and stops[0]["reason"] == "pass" and stops[0]["max_reflect_rounds"] == 2
+    assert stops[0]["reflect_rounds"] == 1 == res["reflect_rounds"]
 
 
 def test_result_on_failure_with_reason(tmp_path):
@@ -83,10 +85,11 @@ def test_result_on_failure_with_reason(tmp_path):
     o.run()
     res, trace = load(o)
     assert res["status"] == "failed" and res["reason"] == "max_iters" and not res["passed"]
-    assert res["pass_rate"] == 0.5 and res["iterations_to_pass"] is None
+    assert res["pass_rate"] == 0.5 and res["candidates_to_pass"] is None
+    assert res["candidates"] == 3 and res["reflect_rounds"] == 2
     assert o.states[-1] == "FAILED"
     stop = [e for e in trace if e["kind"] == "loop_stop"][-1]
-    assert stop["reason"] == "max_iters" and stop["iters_done"] == 2 == stop["iters_max"]
+    assert stop["reason"] == "max_iters" and stop["reflect_rounds"] == 2 == stop["max_reflect_rounds"]
 
 
 def test_result_written_when_exception_mid_run(tmp_path):
@@ -152,7 +155,7 @@ def test_baseline_writes_result_even_on_exception(tmp_path):
     ok = run_loop(B01, c, "baseline-b", seed=0, role=c.llm.roles["coder"], runs_dir=tmp_path,
                   llm=ScriptedChat([code("// ok")]), verify_fn=v.verify, run_id="ok")
     res = json.loads((ok.run_dir / "result.json").read_text())
-    assert res["status"] == "done" and res["iterations_to_pass"] == 1
+    assert res["status"] == "done" and res["candidates_to_pass"] == 1 and res["reflect_rounds"] == 0
 
 
 def test_interruptible_outside_main_thread_is_noop():

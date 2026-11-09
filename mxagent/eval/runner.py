@@ -103,8 +103,19 @@ class Runner:
                     pass
         elif self.c.ppa_backends:
             entry["ppa"] = self.synth_run(j, run_dir)
+        self._clean(run_dir)
         self._append(entry)
         return entry
+
+    def _clean(self, run_dir: Path) -> None:
+        """Dopo eval_synth/eval_wrap (che ricompilano): via sbt/target e oggetti di Verilator."""
+        if self.c.set.get("runs.keep_build_artifacts") or not run_dir.is_dir():
+            return
+        from ..run.cleanup import clean_run
+        try:
+            clean_run(run_dir)
+        except OSError:
+            pass
 
     def _task(self, name: str):
         from ..bench.task import load_task

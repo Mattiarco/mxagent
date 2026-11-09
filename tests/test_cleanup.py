@@ -52,3 +52,41 @@ def test_orchestrator_cleans_unless_configured(tmp_path):
 
 def test_cocotb_seed_env():
     assert seed_env(7) == ["COCOTB_RANDOM_SEED=7", "RANDOM_SEED=7"]
+
+
+def test_clean_run_finds_nested_sbt_workspaces(tmp_path):
+    """runs/verify/<task>/ e eval_wrap/ hanno il loro workspace sbt: si pulisce anche quello."""
+    keep = ["sbt/build.sbt", "sbt/src/main/scala/cand_X_00/X.scala", "manual/X.sv",
+            "eval_wrap/sbt/build.sbt", "eval_wrap/sim/results.json", "eval_wrap/wrap_report.json"]
+    drop = ["sbt/target/a.class", "sbt/project/target/b.jar", "eval_wrap/sbt/target/c.jar",
+            "eval_wrap/sbt/.bsp/sbt.json", "eval_wrap/sim/Vtop", "manual/sim/Vtop.o"]
+    for rel in keep + drop:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    # una copia di build.sbt dentro target non è un workspace (e target sparisce comunque)
+    (tmp_path / "sbt/target/streams/build.sbt").parent.mkdir(parents=True)
+    (tmp_path / "sbt/target/streams/build.sbt").write_text("x")
+    clean_run(tmp_path)
+    assert all((tmp_path / k).is_file() for k in keep)
+    assert not any((tmp_path / d).exists() for d in drop)
+
+
+def test_campaign_runner_cleans_job_dirs(tmp_path):
+    from mxagent.eval.campaign import Campaign, jobs
+    from mxagent.eval.runner import Runner
+    from mxagent.util.shell import Result
+
+    c = Campaign(name="t", tasks=["b01_e2m1_decode"], modes=["baseline-a"], seeds=1,
+                 models={"m": {"all": "x:1b"}}, ppa_backends=[])
+
+    def fake(cmd, cwd, timeout):
+        rd = Path(cmd[cmd.index("--runs-dir") + 1]) / cmd[cmd.index("--run-id") + 1]
+        (rd / "sbt" / "target").mkdir(parents=True)
+        (rd / "sbt" / "target" / "big.jar").write_bytes(b"x" * 1000)
+        (rd / "metrics.json").write_text(json.dumps({"passed": False}))
+        return Result(cmd, 1, "", "", 0.1)
+
+    r = Runner(c, tmp_path / "ev", repo=Path(__file__).resolve().parent.parent, executor=fake)
+    r.run(log=lambda s: None)
+    rd = tmp_path / "ev" / "runs" / jobs(c, tmp_path / "ev")[0].id
+    assert (rd / "metrics.json").is_file() and not (rd / "sbt" / "target").exists()

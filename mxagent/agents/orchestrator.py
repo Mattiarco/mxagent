@@ -72,7 +72,7 @@ class Orchestrator:
         self.states: list[str] = []
         self._t_pass: float | None = None
         self._llm_at_pass: dict | None = None
-        self._iters_at_pass: int | None = None
+        self._cands_at_pass: int | None = None
         self._finalized = False
         self._selected: str | None = None
         self.final_ppa: PPAReport | None = None
@@ -388,8 +388,7 @@ class Orchestrator:
             if final.passed:
                 self._t_pass = time.monotonic()
                 self._llm_at_pass = self.budget.to_dict()  # confronto a pari budget (M6)
-                c = self.ctx.counters
-                self._iters_at_pass = c["candidates"] + c["no_code"]
+                self._cands_at_pass = self.ctx.counters["candidates"]
             if final.passed and (self.cfg.agent.ppa or self.cfg.synth.backends):
                 ppa_out = self._ppa_out = self._ppa_safe(final)
             if final.passed and self.task.wrapper == "cvxif":
@@ -422,6 +421,7 @@ class Orchestrator:
             "task": self.task.name, "mode": self.mode, "model": coder, "seed": self.seed,
             "passed": passed, "stop": stop if not passed else "pass",
             "iterations": c["candidates"] + c["no_code"],
+            "candidates_to_pass": self._cands_at_pass, "reflect_rounds": c["reflect_rounds"],
             "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
             "wall_s": round(time.monotonic() - t0, 1),
             "best_stage": b.stage if b else "no_code",
@@ -458,8 +458,8 @@ class Orchestrator:
                 "passed": bool(final and final.passed),
                 "pass_rate": sim.get("pass_rate", 0.0), "n_vectors": sim.get("total"),
                 "best_stage": b.stage if b else "no_code", "best_candidate": best_tag,
-                "iterations": c["candidates"] + c["no_code"],
-                "iterations_to_pass": self._iters_at_pass,
+                "candidates": c["candidates"], "no_code": c["no_code"],
+                "candidates_to_pass": self._cands_at_pass, "reflect_rounds": c["reflect_rounds"],
                 "time_to_pass_s": round(self._t_pass - t0, 1) if self._t_pass else None,
                 "wall_s": round(time.monotonic() - t0, 1),
                 "llm_calls": bud["calls"], "tokens_in": bud["prompt_tokens"],

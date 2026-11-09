@@ -106,6 +106,23 @@ Ogni `mxagent run` produce `runs/<id>/` (o `$MXAGENT_RUNS/<id>/`):
 | `ppa.json`, `ppa/` | sintesi del design corretto e di quello ottimizzato, passi del PPA Optimizer |
 | `final_functional/` | design corretto prima del PPA Optimizer (solo se questo l'ha migliorato) |
 
+`result.json` è sempre presente (anche per run fallite o interrotte) e conta le
+iterazioni in due modi distinti:
+
+| campo | definizione |
+|---|---|
+| `candidates_to_pass` | candidati **verificati** (compilati e simulati) fino al primo pass compreso, blocchi del catalogo inclusi; esclusi le risposte senza codice e i duplicati. `null` se la run non passa |
+| `reflect_rounds` | **cicli di correzione** dopo la generazione iniziale: riflessioni sul feedback e ricampionamenti dell'anti-loop (nelle baseline: chiamate con il feedback della precedente). Il best-of-N iniziale non conta |
+| `candidates`, `no_code` | candidati verificati in tutto e risposte senza codice |
+
+Esempio: best-of-3 con il terzo che passa dà `candidates_to_pass: 3`, `reflect_rounds: 0`;
+un candidato sbagliato corretto da due riflessioni dà `3` e `2`. Lo stesso
+`reflect_rounds` è nell'evento `loop_stop` del trace, per solver.
+
+A fine comando `run`, `verify`, `synth` e `wrap` cancellano gli artefatti di build
+(`sbt/target`, `.bsp`, oggetti di Verilator) anche in `runs/verify/<task>/`;
+`--keep-build` (o `runs.keep_build_artifacts: true`) li tiene.
+
 Le risposte del modello sono in cache (`.cache/llm`, chiave = modello + digest +
 messaggi + opzioni): una run rieseguita con gli stessi parametri è identica.
 

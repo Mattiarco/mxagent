@@ -37,6 +37,20 @@ def _f32(bits: int) -> str:
     return f"0x{bits:08X} ({struct.unpack('<f', struct.pack('<I', bits))[0]!r})"
 
 
+def _clean(path, keep: bool) -> None:
+    """Cancella gli artefatti di build (sbt/target, oggetti di Verilator) sotto ``path``."""
+    from pathlib import Path
+
+    from .run.cleanup import clean_run
+
+    if keep or not Path(path).is_dir():
+        return
+    r = clean_run(Path(path))
+    if r["freed_bytes"]:
+        print(f"pulizia {path}: {r['freed_bytes'] / 1e6:.1f} MB di build rimossi "
+              f"({r['kept_bytes'] / 1e6:.1f} MB restano)")
+
+
 def cmd_doctor(a: argparse.Namespace) -> int:
     from .config import load_config
     from .doctor import format_checks, run_checks
@@ -110,6 +124,8 @@ def cmd_verify(a: argparse.Namespace) -> int:
         rep = v.verify(sources, a.tag)
         if a.keep_server:
             v.sbt_mode = "batch"  # evita lo shutdown in __exit__
+    # col server sbt ancora acceso non si toccano i suoi target
+    _clean(work / task.name, a.keep_build or a.keep_server)
     print(f"[{task.name}] stage={rep.stage} passed={rep.passed} "
           f"score={rep.score} tempi={rep.seconds}")
     print(rep.feedback)
@@ -192,6 +208,7 @@ def cmd_synth(a: argparse.Namespace) -> int:
         mode = "batch" if os.name == "nt" else "client"
         with Verifier(task, work, sbt_mode=mode, random_vectors=a.random) as v:
             rep = v.verify(sources, a.tag)
+        _clean(work, a.keep_build)  # il Verilog emesso (.sv) resta
         if not rep.passed:  # si sintetizza solo un design corretto
             print(rep.feedback)
             raise SystemExit(f"[{task.name}] il design non passa la verifica ({rep.stage})")
@@ -228,6 +245,7 @@ def cmd_wrap(a: argparse.Namespace) -> int:
         base = Path(os.environ.get("MXAGENT_WORK") or "runs/verify") / task.name
         with Verifier(task, base, sbt_mode=mode, random_vectors=a.random) as v:
             rep = v.verify({p.name: p.read_text(encoding="utf-8") for p in files}, a.tag)
+        _clean(base, a.keep_build)
         if not rep.passed:
             print(rep.feedback)
             raise SystemExit(f"[{task.name}] il MAC non passa la verifica ({rep.stage})")
@@ -236,6 +254,7 @@ def cmd_wrap(a: argparse.Namespace) -> int:
     if task.wrapper != "cvxif":
         raise SystemExit(f"{task.name} non dichiara wrapper: cvxif")
     r = test_wrapper(task, verilog, work, seed=a.seed, n_random=a.programs, sbt_mode="batch")
+    _clean(work, a.keep_build)
     print(f"[{task.name}] CV-X-IF: {r.stage} passed={r.passed} istruzioni={r.instructions} "
           f"mac={r.macs} uccise={r.killed} rifiutate={r.rejected} cicli={r.cycles} ({r.seconds} s)")
     for e in r.errors[:10]:
@@ -317,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     vp.add_argument("--sbt-mode", default=None, choices=["batch", "client"],
                     help="client = server sbt persistente (default su Linux), batch = a freddo")
     vp.add_argument("--keep-server", action="store_true", help="lascia acceso il server sbt")
+    vp.add_argument("--keep-build", action="store_true",
+                    help="non cancellare sbt/target e gli oggetti di Verilator")
     vp.add_argument("--seed", type=int, default=0)
     vp.add_argument("--random", type=int, default=2000)
     vp.set_defaults(func=cmd_verify)
@@ -346,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--out", default=None, help="cartella dei risultati")
     sp.add_argument("--tag", default="synth")
     sp.add_argument("--random", type=int, default=2000)
+    sp.add_argument("--keep-build", action="store_true", help="non cancellare gli artefatti di build")
     sp.set_defaults(func=cmd_synth)
 
     wp = sub.add_parser("wrap", help="wrapper coprocessore RISC-V CV-X-IF del MAC (b08) e suo test")
@@ -358,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     wp.add_argument("--seed", type=int, default=0)
     wp.add_argument("--programs", type=int, default=150, help="vettori casuali oltre ai corner")
     wp.add_argument("--random", type=int, default=2000)
+    wp.add_argument("--keep-build", action="store_true", help="non cancellare gli artefatti di build")
     wp.set_defaults(func=cmd_wrap)
 
     ep = sub.add_parser("eval", help="campagna di valutazione (baseline, sistema completo, ablation)")
