@@ -42,7 +42,11 @@ scelto e scrive `final/`:
 | `selection.json` | candidato scelto e perché; ogni altro candidato con esito e motivo dello scarto |
 
 `selection.json` riporta anche lo sha256 del `.sv` finale e di quello del
-candidato scelto (`sv_matches_selected`).
+candidato scelto. `sv_sha256` e `sv_matches_selected` usano il Verilog normalizzato
+(senza commenti `//` e `/* */`, spazi a fine riga e righe vuote): firtool scrive nei
+commenti il percorso del sorgente (`cand_<Top>_03/...` contro `cand_<Top>_final/...`),
+che cambia anche quando la logica è identica. Gli hash dei byte restano in
+`sv_sha256_raw` e `sv_matches_selected_raw`.
 
 Questa è l'ultima verifica della run, quindi anche `sbt/src` contiene solo il
 design finale.

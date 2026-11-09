@@ -276,8 +276,13 @@ class Orchestrator:
             (out / name).write_text(code, encoding="utf-8")
         final_sv = _copy_verilog(rep.verilog, out)
         rep.save(out / "report.json")
-        selected_sv = _sv_hashes(best.report.verilog)  # Verilog della verifica che lo ha scelto
+        # Verilog della verifica che lo ha scelto: il confronto è sul testo NORMALIZZATO
+        # (firtool scrive nei commenti il percorso del sorgente, che cambia col tag)
+        selected_sv = _sv_hashes(best.report.verilog)
+        final_raw =_sv_hashes([str(out / Path(f).name) for f in rep.verilog], raw=True)
+        selected_raw = _sv_hashes(best.report.verilog, raw=True)
         same = bool(final_sv) and all(selected_sv.get(k) == h for k, h in final_sv.items())
+        same_raw = bool(final_raw) and all(selected_raw.get(k) == h for k, h in final_raw.items())
         if self.final_ppa is not None:
             self.rec.write_json("final/ppa.json", {
                 "top": top, "scope": (ppa_out or {}).get("scope"),
@@ -287,7 +292,10 @@ class Orchestrator:
             "reason": _selection_reason(final, opt, rep),
             "final_verify": {"tag": rep.tag, "passed": rep.passed, "stage": rep.stage,
                              "n_vectors": (rep.sim or {}).get("total")},
+            "sv_hash": "sha256 of the Verilog without comments, trailing spaces and blank lines",
             "sv_sha256": final_sv, "selected_sv_sha256": selected_sv, "sv_matches_selected": same,
+            "sv_sha256_raw": final_raw, "selected_sv_sha256_raw": selected_raw,
+            "sv_matches_selected_raw": same_raw,
             "candidates": _candidates(final, opt, selected, best.report.tag),
             "blocks": self.blocks,
         }
@@ -470,12 +478,42 @@ class Orchestrator:
             self.rec.event("result_error", error=f"{type(e).__name__}: {e}")
 
 
-def _sv_hashes(files: list[str]) -> dict[str, str]:
-    """sha256 dei file Verilog esistenti, per nome."""
+def normalize_sv(text: str) -> str:
+    """Verilog senza commenti ``//`` e ``/* */`` (fuori dalle stringhe), spazi a fine
+    riga e righe vuote: due emissioni della stessa logica che differiscono solo per i
+    commenti-locatore di firtool (``// src/main/scala/cand_X_03/...``) coincidono."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':  # stringa: copiata così com'è (anche se contiene //)
+            j = i + 1
+            while j < n and text[j] != '"' and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    lines = (ln.rstrip() for ln in "".join(out).splitlines())
+    return "\n".join(ln for ln in lines if ln) + "\n"
+
+
+def _sv_hashes(files: list[str], raw: bool = False) -> dict[str, str]:
+    """sha256 dei file Verilog esistenti, per nome: del testo normalizzato
+    (:func:`normalize_sv`) o, con ``raw``, dei byte del file."""
     out = {}
     for f in map(Path, files):
         if f.is_file() and f.suffix in (".sv", ".v"):
-            out[f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+            data = f.read_bytes() if raw else normalize_sv(
+                f.read_text(encoding="utf-8", errors="replace")).encode()
+            out[f.name] = hashlib.sha256(data).hexdigest()
     return out
 
 
