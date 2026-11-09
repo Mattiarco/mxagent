@@ -160,6 +160,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                         rec.event("verify", iter=it, stage="no_code", passed=False)
                     else:
                         sources = {f"{task.top}.scala": code}
+                        if budget.wall >= budget.max_wall_s:  # niente verifiche oltre il tempo
+                            raise BudgetExceeded(f"tempo esaurito ({budget.wall:.0f}/"
+                                                 f"{budget.max_wall_s:.0f}s)", "max_wall_s")
                         rep = verify_fn(sources, f"it{it:02d}")
                         reports.append(rep)
                         rec.save_candidate(rep.tag, sources, {

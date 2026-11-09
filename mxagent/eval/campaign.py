@@ -104,6 +104,16 @@ class Campaign(_Strict):
     set: dict[str, Any] = {}  # override globali della config
     ppa_backends: list[str] = ["generic"]  # sintesi dei design passati (tutte le modalità)
     job_timeout_s: int | None = None  # default: 2 x budget.max_wall_s + 1800
+    #: tempo massimo della campagna (somma dei job, warm-up escluso); oltre, i job
+    #: rimanenti sono registrati come ``skipped_budget`` e non eseguiti
+    campaign_budget_s: int | None = Field(None, ge=1)
+    #: carica i modelli in Ollama prima del primo job di ogni insieme di modelli
+    warmup: bool = False
+
+    @field_validator("modes", mode="before")
+    @classmethod
+    def _mode_alias(cls, v: Any) -> Any:
+        return [m.replace("_", "-") for m in v] if isinstance(v, list) else v  # baseline_a
 
     @field_validator("modes")
     @classmethod

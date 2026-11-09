@@ -32,17 +32,25 @@ def which(name: str) -> str | None:
 
 
 def run(cmd: list[str], cwd: str | Path | None = None, timeout: float | None = 600,
-        env: dict[str, str] | None = None) -> Result:
+        env: dict[str, str] | None = None, grace: float = 30) -> Result:
+    """Esegue ``cmd``. Allo scadere di ``timeout`` manda SIGTERM e aspetta ``grace``
+    secondi prima di SIGKILL: un ``mxagent run`` fa in tempo a scrivere ``result.json``."""
     full_env = None if env is None else {**os.environ, **env}
     t0 = time.monotonic()
     exe = which(cmd[0]) or cmd[0]  # su Windows risolve .bat/.cmd (es. sbt)
     try:
-        p = subprocess.run([exe, *cmd[1:]], cwd=cwd, env=full_env, capture_output=True,
-                           text=True, errors="replace", timeout=timeout)
-        return Result(cmd, p.returncode, p.stdout, p.stderr, time.monotonic() - t0)
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-        return Result(cmd, -1, out, err, time.monotonic() - t0, timed_out=True)
+        p = subprocess.Popen([exe, *cmd[1:]], cwd=cwd, env=full_env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, errors="replace")
     except FileNotFoundError as e:
         return Result(cmd, 127, "", str(e), time.monotonic() - t0)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return Result(cmd, p.returncode, out, err, time.monotonic() - t0)
+    except subprocess.TimeoutExpired:
+        p.terminate()
+        try:
+            out, err = p.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = p.communicate()
+        return Result(cmd, -1, out or "", err or "", time.monotonic() - t0, timed_out=True)

@@ -84,7 +84,8 @@ mxagent synth --task benchmarks/b05_mxfp4_dot32  # PPA del riferimento (verifica
 mxagent synth --run runs/<id> --backends generic,ecp5,nextpnr   # PPA del design di una run
 mxagent wrap                                    # coprocessore CV-X-IF del MAC (b08) e test di protocollo
 mxagent eval --campaign configs/eval/main.yaml  # campagna (baseline, full, ablation), riprendibile
-mxagent report --dir evals/main                 # tabelle, CI di Wilson, McNemar, PPA
+mxagent report evals/main                       # tabelle, CI di Wilson, McNemar, PPA
+mxagent eval --tasks b04_mxfp4_quantize --configs full,baseline_a --model-profiles all14b \n  --seeds 0 --campaign-budget-s 21600 --out runs/eval_<data> --dry-run   # senza YAML (docs/eval.md)
 make test                                       # test (quelli d'integrazione richiedono la toolchain)
 ```
 

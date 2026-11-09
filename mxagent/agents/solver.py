@@ -15,7 +15,7 @@ from typing import Any
 from ..bench.task import Task
 from ..config import Config, ModelRole
 from ..formats.cards import format_card
-from ..llm.chat import ChatModel
+from ..llm.chat import BudgetExceeded, ChatModel
 from ..rag import kb
 from ..rag.library import Library
 from ..run.recorder import Recorder
@@ -47,6 +47,13 @@ class AgentContext:
 
     def remember(self, sources: dict[str, str], tag: str, outcome: str) -> None:
         self.seen[source_hash(sources)] = {"tag": tag, "outcome": outcome}
+
+    def check_wall(self) -> None:
+        """Il tempo si controlla anche prima di ogni verifica, non solo prima delle
+        chiamate LLM: oltre ``max_wall_s`` non parte più nessun lavoro nuovo."""
+        b = getattr(self.llm, "budget", None)
+        if b is not None and b.wall >= b.max_wall_s:
+            raise BudgetExceeded(f"tempo esaurito ({b.wall:.0f}/{b.max_wall_s:.0f}s)", "max_wall_s")
 
     def role(self, name: str) -> ModelRole:
         roles = self.cfg.llm.roles
@@ -211,6 +218,7 @@ class ModuleSolver:
             ctx.rec.event("duplicate", module=self.task.top, origin=origin, same_as=dup["tag"],
                           outcome=dup["outcome"])
             return None
+        ctx.check_wall()
         ctx.counters["candidates"] += 1
         rep = self.verifier.verify(sources, self._tag(n))
         ctx.remember(sources, rep.tag, "pass" if rep.passed else rep.stage)

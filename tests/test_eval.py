@@ -203,3 +203,106 @@ def test_report_on_partial_campaign(tmp_path):
     r.run(limit=4, log=lambda s: None)
     S = write_report(tmp_path)
     assert S["jobs"]["done"] == 4 and S["jobs"]["missing"] == 17
+
+
+# ------------------------------------------------- campagna da flag, budget, warm-up
+FLAGS = ["eval", "--tasks", "b04_mxfp4_quantize,b05_mxfp4_dot32",
+         "--configs", "full,baseline_a,baseline_b", "--model-profiles", "all14b,all32b",
+         "--seeds", "0", "--campaign-budget-s", "21600"]
+
+
+def test_flag_campaign_dry_run(tmp_path, capsys, monkeypatch):
+    from mxagent.cli import main
+    monkeypatch.chdir(ROOT)
+    assert main([*FLAGS, "--out", str(tmp_path / "eval_x"), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "12 job, 12 da eseguire" in out and "21600 s (6.0 h)" in out
+    assert "max_wall_s 1800 s, max_llm_calls 40, max_tokens 300000" in out
+    assert "al più 2 tentativi" in out and "12 x 1800 s = 6.0 h" in out
+    order = [ln.split()[1:4] for ln in out.splitlines() if ln.strip()[:3].strip(". ").isdigit()]
+    # prima tutto all14b, poi all32b; dentro ogni profilo prima b04 poi b05
+    assert [o[2] for o in order] == ["all14b"] * 6 + ["all32b"] * 6
+    assert [o[0][:3] for o in order[:6]] == ["b04"] * 3 + ["b05"] * 3
+    assert [o[1] for o in order[:3]] == ["full", "baseline-a", "baseline-b"]
+    assert "llm.profile=all14b" in out and "library.readonly=true" in out
+    assert not (tmp_path / "eval_x").exists()  # il dry-run non scrive nulla
+
+
+def test_flag_campaign_jobs_overrides(tmp_path):
+    from mxagent.cli import flag_campaign
+    c = flag_campaign(_parse([*FLAGS, "--out", str(tmp_path / "e")]), "e")
+    assert c.campaign_budget_s == 21600 and c.warmup and c.job_timeout_s == 2700
+    js = jobs(c, tmp_path)
+    full = dict(next(j for j in js if j.mode == "full").overrides)
+    base = dict(next(j for j in js if j.mode == "baseline-a").overrides)
+    assert full["llm.profile"] == "all14b" and full["library.readonly"] is True
+    assert full["synth.optimize_iters"] == 2 and full["budget.max_llm_calls"] == 40
+    assert base["llm.profile"] == "all14b" and "library.path" not in base
+
+
+def _parse(argv):
+    """Argomenti di ``mxagent eval`` dal parser vero, senza eseguire la campagna."""
+    from mxagent import cli
+    captured = {}
+
+    def fake(a):
+        captured["a"] = a
+        return 0
+    orig = cli.cmd_eval
+    cli.cmd_eval = fake
+    try:
+        cli.main(argv)
+    finally:
+        cli.cmd_eval = orig
+    return captured["a"]
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_campaign_budget_skips_remaining_jobs_and_warmup_is_free(tmp_path):
+    from mxagent.cli import flag_campaign
+    c = flag_campaign(_parse([*FLAGS[:-2], "--campaign-budget-s", "250", "--out", "x"]), "x")
+    c = c.model_copy(update={"ppa_backends": []})
+    clock, warm = Clock(), []
+
+    def ex(cmd, cwd, timeout):
+        clock.t += 100  # ogni job dura 100 s
+        rd = Path(cmd[cmd.index("--runs-dir") + 1]) / cmd[cmd.index("--run-id") + 1]
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "metrics.json").write_text(json.dumps({"passed": False}))
+        return Result(cmd, 1, "", "", 100)
+
+    def wu(models):
+        clock.t += 10_000  # il warm-up non conta nel budget
+        warm.append(sorted(set(models.values())))
+        return {m: {"ok": True, "seconds": 1} for m in set(models.values())}
+
+    r = Runner(c, tmp_path, repo=ROOT, executor=ex, warmup=wu, clock=clock)
+    log = []
+    r.run(log=log.append)
+    st = r.status()
+    order = [j.id for j in jobs(c, tmp_path)]
+    assert [st[j]["status"] for j in order] == ["done"] * 3 + ["skipped_budget"] * 9
+    assert "budget di campagna esaurito" in st[order[3]]["error"]
+    assert warm == [["nomic-embed-text", "qwen2.5-coder:14b"]]  # solo all14b è partito
+    assert (tmp_path / "warmup.jsonl").is_file()
+    # ripresa senza budget: i job skipped_budget si eseguono, con warm-up del 32b
+    r2 = Runner(c.model_copy(update={"campaign_budget_s": None}), tmp_path, repo=ROOT, executor=ex,
+                warmup=wu, clock=clock)
+    assert len(r2.pending()) == 9
+    r2.run(log=log.append)
+    assert all(e["status"] == "done" for e in r2.status().values())
+    assert warm[-1] == ["nomic-embed-text", "qwen2.5-coder:32b"]
+
+
+def test_shell_timeout_terminates(tmp_path):
+    import sys
+    from mxagent.util.shell import run
+    r = run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1, grace=5)
+    assert r.timed_out and r.seconds < 20
