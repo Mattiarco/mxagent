@@ -102,10 +102,17 @@ class PPAOptimizer:
             res.stop = "no_primary_metric"
             self._stop(res)
             return res
+        cells = self._cells(start)
+        if self.cfg.ppa_min_cells and cells is not None and cells < self.cfg.ppa_min_cells:
+            res.stop = "too_small"  # niente da ottimizzare: si risparmiano LLM e sintesi
+            self._stop(res, cells=cells, min_cells=self.cfg.ppa_min_cells)
+            return res
         history: list[str] = []
         ideas: list[str] = []
         stopped = False
-        for i in range(self.cfg.optimize_iters):
+        streak = 0  # tentativi di fila senza miglioramento (rifiutati o duplicati)
+        n_iters = self.cfg.optimize_iters
+        for i in range(n_iters):
             note, temp = "", None
             for retry in (False, True):  # al più una rigenerazione se la proposta è un duplicato
                 self._seed += 1
@@ -154,6 +161,14 @@ class PPAOptimizer:
                         + "\nIDEAS ALREADY TRIED:\n" + "\n".join(f"- {x}" for x in ideas) + "\n")
             if stopped:
                 break
+            last = res.steps[-1] if res.steps else None
+            if last is not None and last.outcome == "accepted":
+                streak = 0
+            elif last is not None and last.outcome in ("rejected", "duplicate"):
+                streak += 1
+            if streak >= self.cfg.ppa_patience and i < n_iters - 1:
+                res.stop = "plateau"
+                break
         else:
             res.stop = "iters_exhausted"
         res.final, res.sources, res.verilog = best, best_src, best_v
@@ -190,8 +205,14 @@ class PPAOptimizer:
             "primary": list(step.primary) if step.primary else None})
         return step, vlog, pr
 
-    def _stop(self, res: PPAResult) -> None:
-        """Perché il loop è finito (iterazioni esaurite, budget, metrica assente)."""
+    def _cells(self, rep: PPAReport) -> float | None:
+        r = rep.results.get(self.cfg.primary)
+        return (r.metrics or {}).get("cells") if r is not None and r.ok else None
+
+    def _stop(self, res: PPAResult, **extra) -> None:
+        """Perché il loop è finito: iters_exhausted, plateau, too_small, budget,
+        no_primary_metric."""
         self.ctx.rec.event("ppa_stop", module=self.task.top, reason=res.stop,
                            iters_done=len({s.n for s in res.steps}), iters_max=self.cfg.optimize_iters,
-                           accepted=res.accepted, duplicates=sum(s.outcome == "duplicate" for s in res.steps))
+                           accepted=res.accepted, duplicates=sum(s.outcome == "duplicate" for s in res.steps),
+                           **extra)

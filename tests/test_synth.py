@@ -140,7 +140,7 @@ def fake_synth(verilog, task, c, work, backends=None):
     a, d = (float(x) for x in verilog[0].split("::")[1].split(","))
     for b in backends or c.backends:
         if b == "generic":
-            rep.results[b] = SynthResult("generic", True, {"transistors": a, "depth": d, "cells": a / 4})
+            rep.results[b] = SynthResult("generic", True, {"transistors": a, "depth": d, "cells": a})
         else:
             rep.results[b] = SynthResult(b, False, error="non disponibile", skipped=True)
     return rep
@@ -283,3 +283,51 @@ def test_doctor_synth_lists_every_backend(monkeypatch):
     assert checks["synth:generic [config]"].ok and not checks["synth:nextpnr [config]"].ok
     assert checks["synth:xc7"].ok and not checks["synth:vivado"].ok
     assert not any(c.required for c in checks.values())
+
+
+def ppa_run(tmp_path, replies, **over):
+    c = cfg(**{"synth.optimize_iters": 4, **over})
+    o = Orchestrator(B01, c, seed=1, runs_dir=tmp_path, llm=ScriptedChat(replies),
+                     verifier_factory=lambda t, n: FakeVerifier(t), synth_fn=fake_synth)
+    r = o.run()
+    trace = json.loads((r.run_dir / "trace.json").read_text())
+    return r, [e for e in trace if e["kind"] == "ppa_stop"][0]
+
+
+def test_ppa_plateau_stops_after_two_attempts_without_gain(tmp_path):
+    # il caso b01: stesse metriche (rifiutato) due volte di fila -> stop, non 4 tentativi
+    replies = [code("E2M1Decode", "// ok 100,10"), code("E2M1Decode", "// ok 100,10 // v2"),
+               code("E2M1Decode", "// ok 100,10 // v3"), code("E2M1Decode", "// ok 70,10")]
+    r, stop = ppa_run(tmp_path, replies)
+    assert stop["reason"] == "plateau" and stop["iters_done"] == 2
+    assert r.metrics["ppa"]["tried"] == 2 and r.metrics["llm"]["calls"] == 3
+    res = json.loads((r.run_dir / "result.json").read_text())
+    assert res["ppa"]["stop"] == "plateau"
+
+
+def test_ppa_plateau_counter_resets_on_acceptance(tmp_path):
+    replies = [code("E2M1Decode", "// ok 100,10"), code("E2M1Decode", "// ok 100,10 // v2"),
+               code("E2M1Decode", "// ok 80,10"), code("E2M1Decode", "// ok 80,10 // v2"),
+               code("E2M1Decode", "// ok 80,10 // v3")]
+    r, stop = ppa_run(tmp_path, replies)
+    assert stop["reason"] == "iters_exhausted" and stop["iters_done"] == 4
+    ppa = json.loads((r.run_dir / "ppa.json").read_text())
+    assert [s["outcome"] for s in ppa["optimizer"]["steps"]] == ["rejected", "accepted", "rejected",
+                                                                 "rejected"]
+
+
+def test_ppa_skipped_for_small_design_but_final_synthesis_done(tmp_path):
+    r, stop = ppa_run(tmp_path, [code("E2M1Decode", "// ok 40,6")],
+                      **{"synth.backends": ["generic", "ecp5"]})
+    assert stop["reason"] == "too_small" and stop["cells"] == 40 and stop["min_cells"] == 50
+    assert r.metrics["llm"]["calls"] == 1 and r.metrics["ppa"]["tried"] == 0  # nessuna chiamata optimizer
+    ppa = json.loads((r.run_dir / "ppa.json").read_text())
+    assert list(ppa["final"]) == ["generic", "ecp5", "vivado"] and ppa["final"]["generic"]["ok"]
+    res = json.loads((r.run_dir / "result.json").read_text())
+    assert res["ppa"]["stop"] == "too_small" and res["final_dir"] == "final"
+    sel = json.loads((r.run_dir / "final" / "selection.json").read_text())
+    assert "PPA optimizer skipped (too_small" in sel["reason"]
+    # ppa_min_cells = 0: il loop parte comunque
+    _, stop0 = ppa_run(tmp_path / "zero", [code("E2M1Decode", "// ok 40,6"), "no code"],
+                       **{"synth.ppa_min_cells": 0, "synth.optimize_iters": 1})
+    assert stop0["reason"] == "iters_exhausted"

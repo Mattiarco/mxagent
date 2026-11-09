@@ -87,7 +87,12 @@ Lo stadio `PPA` parte **solo dopo il pass** ([orchestrator.py](../mxagent/agents
 [ppa.py](../mxagent/agents/ppa.py)):
 
 1. Sintesi primaria (`synth.primary`, default `generic`) del design corretto.
-2. Fino a `synth.optimize_iters` passi. A ogni passo l'LLM (ruolo `optimizer`,
+   Se ha meno di `synth.ppa_min_cells` celle (default 50) il loop è saltato
+   (`ppa_stop` con `reason: "too_small"`): su b01 (decine di celle) quattro tentativi
+   davano sempre lo stesso risultato. Il punto 6 si fa comunque.
+2. Fino a `synth.optimize_iters` passi. Arresto anticipato: dopo
+   `synth.ppa_patience` tentativi di fila rifiutati o duplicati (default 2) il loop
+   si ferma con `reason: "plateau"`; un candidato accettato azzera il conteggio. A ogni passo l'LLM (ruolo `optimizer`,
    se manca si usa `reflector`) riceve:
    - specifica, interfaccia e scheda di dominio;
    - il codice migliore finora;

@@ -102,6 +102,11 @@ class SynthConfig(_Strict):
     optimize_iters: int = Field(4, ge=0)
     min_gain: float = Field(0.01, ge=0)  # miglioramento relativo minimo per accettare
     tolerance: float = Field(0.02, ge=0)  # peggioramento ammesso sull'altra metrica
+    #: arresto anticipato: N tentativi di fila rifiutati o duplicati -> stop "plateau"
+    ppa_patience: int = Field(2, ge=1)
+    #: design iniziale con meno celle generic di così: loop saltato ("too_small");
+    #: la sintesi finale su tutti i backend si fa comunque. 0 = mai saltato
+    ppa_min_cells: int = Field(50, ge=0)
 
     @field_validator("backends")
     @classmethod

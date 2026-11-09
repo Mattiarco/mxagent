@@ -536,7 +536,9 @@ def _selection_reason(final: SolveResult, opt: dict, rep) -> str:
         why = acc[0]["detail"] if acc else ""
         return f"PPA candidate accepted ({opt.get('objective')}: {why}); {vec}"
     ppa = ""
-    if opt:
+    if opt.get("stop") == "too_small":
+        ppa = "; PPA optimizer skipped (too_small: fewer generic cells than synth.ppa_min_cells)"
+    elif opt:
         ppa = f"; PPA optimizer: {opt.get('tried', 0)} attempts, none accepted ({opt.get('stop')})"
     return f"first candidate to pass ({final.module}, {vec}){ppa}"
 

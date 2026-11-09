@@ -83,6 +83,8 @@ synth:
   optimize_iters: 4
   min_gain: 0.01
   tolerance: 0.02
+  ppa_patience: 2       # tentativi di fila rifiutati/duplicati prima dello stop "plateau"
+  ppa_min_cells: 50     # sotto questa soglia (celle generic) il loop PPA è saltato: "too_small"
 
 # Semantica numerica (vedi mxagent/formats/numerics.py); i task possono sovrascriverla.
 numerics:
