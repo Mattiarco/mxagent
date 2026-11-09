@@ -15,6 +15,7 @@ from typing import Any
 
 from .campaign import Campaign, Job, jobs
 from .stats import geomean, mcnemar_exact, mean_std, median, pass_at_k, wilson
+from .summary import write_summary
 
 
 def _read(p: Path) -> Any:
@@ -452,8 +453,15 @@ STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@
 
 
 def write_report(out: Path) -> dict:
+    """``summary.md/.csv``, ``notes.md``, ``pass_rate.png`` sempre; con più di un seed
+    anche ``report.md``, ``stats.csv``, ``runs.csv`` e ``summary.json`` (pass@k, CI,
+    McNemar). Con un seed solo le statistiche inferenziali non si calcolano."""
     c, recs, refs = load_records(out)
+    sm = write_summary(out, c)
+    if c.seeds == 1:
+        return {"jobs": sm["jobs"], "summary": "summary.md"}
     S = summarize(c, recs, refs)
+    S["summary"] = "summary.md"
     (out / "summary.json").write_text(json.dumps(S, indent=1, default=str), encoding="utf-8")
     with (out / "runs.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")

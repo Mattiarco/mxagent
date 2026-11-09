@@ -359,7 +359,7 @@ def cmd_eval(a: argparse.Namespace) -> int:
         return 0
     r.run(parallel=a.parallel, retry_errors=a.retry_errors, limit=a.limit)
     S = write_report(out)
-    print(f"report: {out / 'report.md'}  (job: {S['jobs']})")
+    print(f"report: {out / 'summary.md'}  (job: {S['jobs']})")
     return 0
 
 

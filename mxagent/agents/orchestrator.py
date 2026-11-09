@@ -28,8 +28,8 @@ from ..rag.library import Component, Library
 from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
-from ..run.result import (RunInterrupted, check_models, interruptible, llm_by_role, ppa_attempts,
-                          write_result)
+from ..run.result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
+                          ppa_attempts, write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
@@ -458,6 +458,7 @@ class Orchestrator:
                 "passed": bool(final and final.passed),
                 "pass_rate": sim.get("pass_rate", 0.0), "n_vectors": sim.get("total"),
                 "best_stage": b.stage if b else "no_code", "best_candidate": best_tag,
+                "first_error": None if (final and final.passed) else first_error(b),
                 "candidates": c["candidates"], "no_code": c["no_code"],
                 "candidates_to_pass": self._cands_at_pass, "reflect_rounds": c["reflect_rounds"],
                 "time_to_pass_s": round(self._t_pass - t0, 1) if self._t_pass else None,

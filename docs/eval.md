@@ -38,6 +38,22 @@ Senza YAML la campagna usa:
 Il dry-run stampa i job nell'ordine di esecuzione, i budget e un limite superiore del
 tempo (numero di run × `max_wall_s`), non una previsione.
 
+`mxagent report <cartella>` scrive sempre, da `result.json`, `index.jsonl` ed
+`eval_synth/ppa.json` di ogni run ([summary.py](../mxagent/eval/summary.py)):
+- `summary.csv` e `summary.md`: una riga per run (task, configurazione, profilo,
+  `status`, pass e pass rate dei vettori, `candidates_to_pass`, `reflect_rounds`,
+  tempo al pass e totale, chiamate e token in/out, LUT/FF xc7 ed ecp5, Fmax media di
+  nextpnr, ADP generic, guadagno PPA per `full`) e una tabella per configurazione e
+  profilo (passate/eseguite, mediane di tempo e token);
+- `pass_rate.png`: pass rate dei vettori per task × configurazione × profilo
+  (richiede matplotlib: `pip install -e .[eval]`);
+- `notes.md`: per ogni run non passata stadio di fallimento e primo errore
+  (`first_error` di `result.json`).
+
+Con un solo seed (`seeds: 1`) il report dichiara n = 1 e non calcola pass@k,
+intervalli di confidenza né test; con più seed si aggiungono `report.md`,
+`stats.csv`, `runs.csv` e `summary.json` descritti sotto.
+
 ## Campagna
 
 Un YAML ([main.yaml](../configs/eval/main.yaml)) dichiara:

@@ -306,3 +306,74 @@ def test_shell_timeout_terminates(tmp_path):
     from mxagent.util.shell import run
     r = run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1, grace=5)
     assert r.timed_out and r.seconds < 20
+
+
+def test_single_seed_summary_report(tmp_path):
+    """Campagna da 12 run con esiti sintetici noti: summary.csv/.md, notes.md, PNG,
+    nessun pass@k né intervallo di confidenza con n = 1."""
+    from mxagent.cli import flag_campaign
+    from mxagent.eval.summary import FIELDS
+    c = flag_campaign(_parse([*FLAGS[:-2], "--campaign-budget-s", "950", "--out", "x"]), "eval_t")
+    clock = Clock()
+
+    def ex(cmd, cwd, timeout):
+        if cmd[3] == "synth":  # sintesi del riferimento o del design di una run
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "ppa.json").write_text(json.dumps({"results": {
+                "generic": {"ok": True, "metrics": {"transistors": 500, "depth": 12, "cells": 120}},
+                "xc7": {"ok": True, "metrics": {"luts": 40, "ffs": 0}},
+                "ecp5": {"ok": True, "metrics": {"luts": 70, "ffs": 0}},
+                "nextpnr": {"ok": True, "metrics": {"fmax_mhz": 80.0, "fmax_mean": 81.5}}}}))
+            return Result(cmd, 0, "", "", 1)
+        clock.t += 100
+        rid = cmd[cmd.index("--run-id") + 1]
+        rd = Path(cmd[cmd.index("--runs-dir") + 1]) / rid
+        rd.mkdir(parents=True, exist_ok=True)
+        if rid.startswith("b05_mxfp4_dot32__baseline-b__main__all14b"):  # crash del processo
+            (rd / "result.json").write_text(json.dumps({"status": "interrupted",
+                                                        "reason": "signal SIGTERM"}))
+            return Result(cmd, -1, "", "killed", 100, timed_out=True)
+        ok = "__full__" in rid or "baseline-b" in rid
+        full = "__full__" in rid
+        res = {"status": "done" if ok else "failed", "reason": "pass" if ok else "max_iters",
+               "passed": ok, "pass_rate": 1.0 if ok else 0.25, "n_vectors": 3016,
+               "candidates_to_pass": 2 if ok else None, "reflect_rounds": 1,
+               "time_to_pass_s": 300.0 if ok else None, "wall_s": 400.0 if full else 200.0,
+               "llm_calls": 5, "tokens_in": 9000, "tokens_out": 1000,
+               "best_stage": "pass" if ok else "compile",
+               "first_error": None if ok else "scalac:type mismatch",
+               "ppa": {"gain": 0.125, "stop": "plateau"} if full else None}
+        (rd / "result.json").write_text(json.dumps(res))
+        (rd / "metrics.json").write_text(json.dumps({"passed": ok}))
+        return Result(cmd, 0 if ok else 1, "", "", 100)
+
+    out = tmp_path / "eval_t"
+    Runner(c, out, repo=ROOT, executor=ex, warmup=lambda m: {}, clock=clock).run(log=lambda s: None)
+    S = write_report(out)
+    # 950 s di budget: il decimo job parte a 900 s, gli ultimi due no
+    assert S["jobs"] == {"expected": 12, "done": 6, "failed": 3, "interrupted": 1, "skipped_budget": 2}
+    rows = list(__import__("csv").DictReader((out / "summary.csv").open(encoding="utf-8")))
+    assert list(rows[0]) == FIELDS and len(rows) == 12
+    r0 = rows[0]  # b04 full all14b
+    assert (r0["config"], r0["profile"], r0["status"], r0["passed"]) == ("full", "all14b", "done", "True")
+    assert r0["luts_xc7"] == "40" and r0["ffs_ecp5"] == "0" and r0["fmax_mean_mhz"] == "81.5"
+    assert r0["adp_generic"] == "6000" and r0["ppa_gain_pct"] == "12.5" and r0["ppa_stop"] == "plateau"
+    assert r0["candidates_to_pass"] == "2" and r0["reflect_rounds"] == "1"
+    ba = rows[1]  # baseline_a fallita: niente sintesi, niente PPA
+    assert ba["config"] == "baseline_a" and ba["luts_xc7"] == "" and ba["ppa_gain_pct"] == ""
+    crash = next(r for r in rows if r["job"].startswith("b05_mxfp4_dot32__baseline-b__main__all14b"))
+    assert crash["status"] == "interrupted"
+    assert [r["status"] for r in rows[-3:]] == ["done", "skipped_budget", "skipped_budget"]
+    md = (out / "summary.md").read_text(encoding="utf-8")
+    assert "n = 1 seed per combinazione" in md and "non statisticamente significativi" in md
+    assert "pass@" not in md.replace("pass@k", "") and "CI " not in md
+    assert "| full | all14b | 2 / 2 | 0 | 400 | 300 | 10000 |" in md
+    assert "| baseline_b | all32b | 1 / 1 | 1 |" in md
+    assert not (out / "report.md").exists() and not (out / "stats.csv").exists()
+    notes = (out / "notes.md").read_text(encoding="utf-8")
+    assert "b04_mxfp4_quantize · baseline_a · all14b · s0" in notes
+    assert "stadio: `compile`" in notes and "scalac:type mismatch" in notes
+    assert "budget di campagna esaurito" in notes and "signal SIGTERM" in notes
+    pytest.importorskip("matplotlib")
+    assert (out / "pass_rate.png").stat().st_size > 1000 and "pass_rate.png" in md

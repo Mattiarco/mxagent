@@ -89,6 +89,23 @@ def ppa_attempts(ppa_out: dict | None) -> dict[str, int]:
     return {"total": len(steps), **{k: c.get(k, 0) for k in keys}}
 
 
+def first_error(report: Any) -> str | None:
+    """Primo errore del miglior candidato di una run non passata (notes.md del report):
+    la prima firma d'errore del verifier, altrimenti la prima riga del feedback."""
+    if report is None:
+        return "no Scala code in the answer"
+    if getattr(report, "passed", False):
+        return None
+    keys = getattr(report, "error_keys", None) or []
+    if keys:
+        return str(keys[0])[:300]
+    for text in (getattr(report, "feedback", ""), getattr(report, "feedback_raw", "")):
+        for ln in (text or "").splitlines():
+            if ln.strip():
+                return ln.strip()[:300]
+    return None
+
+
 def check_models(rec: Recorder, label: str, mismatches: dict[str, dict[str, str]]) -> None:
     """All'avvio: se il profilo dichiarato (nome della run) non corrisponde ai modelli
     effettivi dei ruoli, warning su stderr ed evento ``model_profile_mismatch``."""

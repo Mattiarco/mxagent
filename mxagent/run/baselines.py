@@ -25,7 +25,8 @@ from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat
 from ..verify.verifier import VerifyReport, Verifier
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
-from .result import RunInterrupted, check_models, interruptible, llm_by_role, write_result
+from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
+                     write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b")
@@ -132,6 +133,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "passed": stop == "pass", "pass_rate": sim.get("pass_rate", 0.0),
                 "n_vectors": sim.get("total"), "best_stage": b.stage if b else "no_code",
                 "best_candidate": b.tag if b else None,
+                "first_error": None if stop == "pass" else first_error(b),
                 "candidates": len(reports), "no_code": no_code,
                 "candidates_to_pass": cands_to_pass, "reflect_rounds": rounds,
                 "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
