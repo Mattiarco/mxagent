@@ -1,6 +1,6 @@
 """CLI headless di mxagent.
 
-    mxagent doctor [--warmup] [--config configs/default.yaml]
+    mxagent doctor [--warmup] [--synth] [--config configs/default.yaml]
     mxagent golden card   [--format mxfp4|nvfp4]
     mxagent golden dot    --a-scale 127 --a 2,2,... --b-scale 127 --b 2,2,...
     mxagent golden quant  --x 1.0,-2.5,...
@@ -9,7 +9,10 @@
     mxagent synth  --task benchmarks/b05_mxfp4_dot32 [--sources X.scala] | --run runs/<id>
     mxagent wrap   --task benchmarks/b08_mxfp4_mac [--sources X.scala] | --run runs/<id>
     mxagent eval   --campaign configs/eval/main.yaml [--dry-run] [--parallel N]
-    mxagent report --dir evals/main
+    mxagent eval   --tasks b04_mxfp4_quantize,b05_mxfp4_dot32 --configs full,baseline_a,baseline_b \
+                   --model-profiles all14b,all32b --seeds 0 --campaign-budget-s 21600 \
+                   --out runs/eval_<data> [--dry-run]
+    mxagent report runs/eval_<data>   (oppure --dir)
 """
 from __future__ import annotations
 
@@ -37,11 +40,34 @@ def _f32(bits: int) -> str:
     return f"0x{bits:08X} ({struct.unpack('<f', struct.pack('<I', bits))[0]!r})"
 
 
+def _clean(path, keep: bool) -> None:
+    """Cancella gli artefatti di build (sbt/target, oggetti di Verilator) sotto ``path``."""
+    from pathlib import Path
+
+    from .run.cleanup import clean_run
+
+    if keep or not Path(path).is_dir():
+        return
+    r = clean_run(Path(path))
+    if r["freed_bytes"]:
+        print(f"pulizia {path}: {r['freed_bytes'] / 1e6:.1f} MB di build rimossi "
+              f"({r['kept_bytes'] / 1e6:.1f} MB restano)")
+
+
 def cmd_doctor(a: argparse.Namespace) -> int:
     from .config import load_config
     from .doctor import format_checks, run_checks
 
     cfg = load_config(a.config)
+    if a.synth:
+        from .doctor import synth_backends
+        print(f"mxagent {__version__} - backend di sintesi (synth.backends = {cfg.synth.backends})\n")
+        checks = synth_backends(cfg.synth.backends, cfg.synth.liberty)
+        print("\n".join(format_checks(checks).splitlines()[:-2]))  # senza "ambiente pronto"
+        miss = [c.name for c in checks if not c.ok and "[config]" in c.name]
+        if miss:
+            print(f"backend in config non disponibili (saranno 'skipped' nel ppa.json): {', '.join(miss)}")
+        return 0
     checks = run_checks(cfg.llm.host, cfg.llm.models(), do_warmup=a.warmup, skip_llm=a.skip_llm)
     print(f"mxagent {__version__} - controllo dell'ambiente\n")
     print(format_checks(checks))
@@ -101,6 +127,8 @@ def cmd_verify(a: argparse.Namespace) -> int:
         rep = v.verify(sources, a.tag)
         if a.keep_server:
             v.sbt_mode = "batch"  # evita lo shutdown in __exit__
+    # col server sbt ancora acceso non si toccano i suoi target
+    _clean(work / task.name, a.keep_build or a.keep_server)
     print(f"[{task.name}] stage={rep.stage} passed={rep.passed} "
           f"score={rep.score} tempi={rep.seconds}")
     print(rep.feedback)
@@ -118,15 +146,21 @@ def cmd_run(a: argparse.Namespace) -> int:
 
     if a.mode not in (*MODES, "full"):
         raise SystemExit(f"modalità {a.mode}: disponibili {MODES + ('full',)}")
+    from .config import LLM_ROLES
+
     over = {}
-    if a.model:
-        over = {f"llm.roles.{r}.model": a.model
-                for r in ("planner", "coder", "fixer", "reflector", "escalate")}
+    if a.model and a.model_profile:
+        raise SystemExit("--model e --model-profile sono alternativi")
+    if a.model:  # scorciatoia per un profilo uniforme: tutti i ruoli LLM, embed escluso
+        over = {f"llm.roles.{r}.model": a.model for r in LLM_ROLES}
     for kv in a.set or []:
         k, v = kv.split("=", 1)
         import yaml as _yaml
         over[k] = _yaml.safe_load(v)
-    cfg = load_config(a.config, over)
+    try:
+        cfg = load_config(a.config, over, profile=a.model_profile)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     task = load_task(a.task)
     runs = Path(a.runs_dir or os.environ.get("MXAGENT_RUNS") or cfg.runs_dir)
     if a.mode == "full":
@@ -177,6 +211,7 @@ def cmd_synth(a: argparse.Namespace) -> int:
         mode = "batch" if os.name == "nt" else "client"
         with Verifier(task, work, sbt_mode=mode, random_vectors=a.random) as v:
             rep = v.verify(sources, a.tag)
+        _clean(work, a.keep_build)  # il Verilog emesso (.sv) resta
         if not rep.passed:  # si sintetizza solo un design corretto
             print(rep.feedback)
             raise SystemExit(f"[{task.name}] il design non passa la verifica ({rep.stage})")
@@ -213,6 +248,7 @@ def cmd_wrap(a: argparse.Namespace) -> int:
         base = Path(os.environ.get("MXAGENT_WORK") or "runs/verify") / task.name
         with Verifier(task, base, sbt_mode=mode, random_vectors=a.random) as v:
             rep = v.verify({p.name: p.read_text(encoding="utf-8") for p in files}, a.tag)
+        _clean(base, a.keep_build)
         if not rep.passed:
             print(rep.feedback)
             raise SystemExit(f"[{task.name}] il MAC non passa la verifica ({rep.stage})")
@@ -221,6 +257,7 @@ def cmd_wrap(a: argparse.Namespace) -> int:
     if task.wrapper != "cvxif":
         raise SystemExit(f"{task.name} non dichiara wrapper: cvxif")
     r = test_wrapper(task, verilog, work, seed=a.seed, n_random=a.programs, sbt_mode="batch")
+    _clean(work, a.keep_build)
     print(f"[{task.name}] CV-X-IF: {r.stage} passed={r.passed} istruzioni={r.instructions} "
           f"mac={r.macs} uccise={r.killed} rifiutate={r.rejected} cicli={r.cycles} ({r.seconds} s)")
     for e in r.errors[:10]:
@@ -228,32 +265,101 @@ def cmd_wrap(a: argparse.Namespace) -> int:
     return 0 if r.passed else 1
 
 
+def _seeds(s: str) -> list[int]:
+    """``0``, ``0,1,2`` o ``0-4``: seed consecutivi."""
+    if "-" in s:
+        lo, hi = (int(x) for x in s.split("-", 1))
+        out = list(range(lo, hi + 1))
+    else:
+        out = _ints(s)
+    if not out or out != list(range(out[0], out[0] + len(out))):
+        raise SystemExit(f"--seeds {s}: servono seed consecutivi (es. 0, 0,1,2 o 0-4)")
+    return out
+
+
+def flag_campaign(a: argparse.Namespace, name: str):
+    """Campagna dai flag di ``mxagent eval`` (senza YAML)."""
+    from .eval.campaign import Campaign
+
+    if not (a.tasks and a.configs and a.model_profiles):
+        raise SystemExit("servono --campaign oppure --tasks, --configs e --model-profiles")
+    seeds = _seeds(a.seeds)
+    return Campaign.model_validate({
+        "name": name, "config": a.config, "tasks": a.tasks.split(","),
+        "modes": a.configs.split(","), "seeds": len(seeds), "seed_start": seeds[0],
+        "models": {p: {"profile": p} for p in a.model_profiles.split(",")},
+        # libreria in sola lettura: nessuna run impara da un'altra della stessa campagna
+        "library": {"policy": "frozen", "path": a.library},
+        "set": {"budget.max_wall_s": a.max_wall_s, "budget.max_llm_calls": a.max_llm_calls,
+                "budget.max_tokens": a.max_tokens, "synth.optimize_iters": a.ppa_iters,
+                "library.exclude_current_task": True},
+        "ppa_backends": a.synth_backends.split(","),
+        # SIGTERM al job oltre max_wall_s + 15 min (sintesi finale): result.json resta
+        "job_timeout_s": a.max_wall_s + 900,
+        "campaign_budget_s": a.campaign_budget_s, "warmup": not a.no_warmup})
+
+
+def describe_campaign(c, r, todo: list) -> str:
+    """Testo del dry-run: job in ordine, budget e stima del tempo (limite superiore)."""
+    from .eval.campaign import jobs
+
+    cfg = r.base_config()
+    b, s = cfg.budget, cfg.synth
+    js = jobs(c, r.out)
+    L = [f"campagna {c.name} ({c.digest()}): {len(js)} job, {len(todo)} da eseguire", "",
+         f"budget per run: max_wall_s {b.max_wall_s} s, max_llm_calls {b.max_llm_calls}, "
+         f"max_tokens {b.max_tokens}",
+         f"PPA (solo full): al più {s.optimize_iters} tentativi, plateau dopo {s.ppa_patience}, "
+         f"saltato sotto {s.ppa_min_cells} celle; baseline senza PPA",
+         f"sintesi finale delle run passate: {', '.join(c.ppa_backends)}",
+         f"timeout per job: {r.timeout():.0f} s (SIGTERM, poi SIGKILL dopo 120 s)",
+         "budget di campagna: " + (f"{c.campaign_budget_s} s ({c.campaign_budget_s / 3600:.1f} h), "
+                                   "poi skipped_budget" if c.campaign_budget_s else "nessuno"),
+         f"libreria: {c.library.policy}" + (f" ({c.library.path}, sola lettura)" if c.library.path else ""),
+         "warm-up dei modelli a ogni cambio di profilo (fuori dal conteggio): "
+         + ("sì" if c.warmup else "no"), "", "ordine di esecuzione:"]
+    done = {j.id for j in js} - {j.id for j in todo}
+    for i, j in enumerate(js, 1):
+        L.append(f"  {i:2d}. {j.task:22s} {j.mode:11s} {j.models:8s} s{j.seed}"
+                 + ("   (già fatto)" if j.id in done else ""))
+    n = len(todo)
+    worst = n * b.max_wall_s
+    L += ["", f"stima: ogni run si ferma a max_wall_s, quindi al più {n} x {b.max_wall_s} s = "
+              f"{worst / 3600:.1f} h di run, più la sintesi finale delle run passate "
+              f"(minuti per run). È un limite superiore, non una previsione."]
+    if c.campaign_budget_s and worst >= c.campaign_budget_s:
+        L.append(f"il limite superiore raggiunge il budget di campagna "
+                 f"({c.campaign_budget_s / 3600:.1f} h): le ultime run potrebbero finire in "
+                 "skipped_budget (prima i profili/task in testa all'elenco)")
+    if todo:
+        L += ["", "primo comando: " + " ".join(r.command(todo[0]))]
+    return "\n".join(L)
+
+
 def cmd_eval(a: argparse.Namespace) -> int:
     """Esegue (o riprende) una campagna di valutazione."""
-    from collections import Counter
+    from datetime import date
     from pathlib import Path
 
-    from .eval.campaign import jobs, load_campaign
+    from .eval.campaign import load_campaign
     from .eval.report import write_report
     from .eval.runner import Runner
 
-    c = load_campaign(a.campaign)
-    out = Path(a.out or Path("evals") / c.name)
+    if a.campaign:
+        c = load_campaign(a.campaign)
+        if a.campaign_budget_s:
+            c = c.model_copy(update={"campaign_budget_s": a.campaign_budget_s})
+        out = Path(a.out or Path("evals") / c.name)
+    else:
+        out = Path(a.out or Path("runs") / f"eval_{date.today():%Y%m%d}")
+        c = flag_campaign(a, out.name)
     r = Runner(c, out)
     if a.dry_run:
-        js = jobs(c, out)
-        todo = r.pending(a.retry_errors)
-        by = Counter((j.mode, j.variant) for j in js)
-        print(f"campagna {c.name} ({c.digest()}): {len(js)} job, {len(todo)} da eseguire, "
-              f"timeout per job {r.timeout():.0f} s")
-        for (mode, var), n in sorted(by.items()):
-            print(f"  {mode:11s} {var:16s} {n}")
-        if todo:
-            print("primo comando:", " ".join(r.command(todo[0])))
+        print(describe_campaign(c, r, r.pending(a.retry_errors)))
         return 0
     r.run(parallel=a.parallel, retry_errors=a.retry_errors, limit=a.limit)
     S = write_report(out)
-    print(f"report: {out / 'report.md'}  (job: {S['jobs']})")
+    print(f"report: {out / 'summary.md'}  (job: {S['jobs']})")
     return 0
 
 
@@ -262,8 +368,11 @@ def cmd_report(a: argparse.Namespace) -> int:
 
     from .eval.report import write_report
 
-    S = write_report(Path(a.dir))
-    print(f"report: {Path(a.dir) / 'report.md'}  (job: {S['jobs']})")
+    d = Path(a.path or a.dir or "")
+    if not str(a.path or a.dir or ""):
+        raise SystemExit("serve la cartella della campagna: mxagent report runs/eval_<data>")
+    S = write_report(d)
+    print(f"report: {d / 'summary.md'}  (job: {S['jobs']})")
     return 0
 
 
@@ -277,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--config", default="configs/default.yaml")
     d.add_argument("--warmup", action="store_true", help="elabora un modulo di prova (popola le cache)")
     d.add_argument("--skip-llm", action="store_true", help="non controllare Ollama (solo toolchain HW)")
+    d.add_argument("--synth", action="store_true", help="elenca i backend di sintesi disponibili/mancanti")
     d.set_defaults(func=cmd_doctor)
 
     gp = sub.add_parser("golden", help="interroga il golden model")
@@ -301,6 +411,8 @@ def main(argv: list[str] | None = None) -> int:
     vp.add_argument("--sbt-mode", default=None, choices=["batch", "client"],
                     help="client = server sbt persistente (default su Linux), batch = a freddo")
     vp.add_argument("--keep-server", action="store_true", help="lascia acceso il server sbt")
+    vp.add_argument("--keep-build", action="store_true",
+                    help="non cancellare sbt/target e gli oggetti di Verilator")
     vp.add_argument("--seed", type=int, default=0)
     vp.add_argument("--random", type=int, default=2000)
     vp.set_defaults(func=cmd_verify)
@@ -310,7 +422,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--mode", default="full", help="full | baseline-a | baseline-b")
     rp.add_argument("--set", nargs="*", metavar="KEY=VAL",
                     help="override della config, es. agent.decompose=false (ablation)")
-    rp.add_argument("--model", default=None, help="sovrascrive il modello di tutti i ruoli")
+    rp.add_argument("--model", default=None,
+                    help="un solo modello per tutti i ruoli LLM (embed escluso)")
+    rp.add_argument("--model-profile", default=None,
+                    help="profilo di modello della config: all14b | all32b | mixed")
     rp.add_argument("--config", default="configs/default.yaml")
     rp.add_argument("--seed", type=int, default=0)
     rp.add_argument("--runs-dir", default=None, help="default $MXAGENT_RUNS o runs_dir della config")
@@ -327,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--out", default=None, help="cartella dei risultati")
     sp.add_argument("--tag", default="synth")
     sp.add_argument("--random", type=int, default=2000)
+    sp.add_argument("--keep-build", action="store_true", help="non cancellare gli artefatti di build")
     sp.set_defaults(func=cmd_synth)
 
     wp = sub.add_parser("wrap", help="wrapper coprocessore RISC-V CV-X-IF del MAC (b08) e suo test")
@@ -339,11 +455,29 @@ def main(argv: list[str] | None = None) -> int:
     wp.add_argument("--seed", type=int, default=0)
     wp.add_argument("--programs", type=int, default=150, help="vettori casuali oltre ai corner")
     wp.add_argument("--random", type=int, default=2000)
+    wp.add_argument("--keep-build", action="store_true", help="non cancellare gli artefatti di build")
     wp.set_defaults(func=cmd_wrap)
 
     ep = sub.add_parser("eval", help="campagna di valutazione (baseline, sistema completo, ablation)")
-    ep.add_argument("--campaign", required=True, help="YAML della campagna (es. configs/eval/main.yaml)")
-    ep.add_argument("--out", default=None, help="cartella della campagna (default evals/<nome>)")
+    ep.add_argument("--campaign", default=None, help="YAML della campagna (es. configs/eval/main.yaml)")
+    ep.add_argument("--out", default=None,
+                    help="cartella della campagna (default evals/<nome> o runs/eval_<data>)")
+    g = ep.add_argument_group("campagna senza YAML")
+    g.add_argument("--tasks", help="es. b04_mxfp4_quantize,b05_mxfp4_dot32")
+    g.add_argument("--configs", help="full,baseline_a,baseline_b")
+    g.add_argument("--model-profiles", help="es. all14b,all32b (llm.profiles della config)")
+    g.add_argument("--seeds", default="0", help="0 | 0,1,2 | 0-4")
+    g.add_argument("--config", default="configs/default.yaml")
+    g.add_argument("--max-wall-s", type=int, default=1800)
+    g.add_argument("--max-llm-calls", type=int, default=40)
+    g.add_argument("--max-tokens", type=int, default=300000)
+    g.add_argument("--ppa-iters", type=int, default=2, help="tentativi massimi del PPA (full)")
+    g.add_argument("--library", default="library", help="libreria (sola lettura)")
+    g.add_argument("--synth-backends", default="generic,ecp5,xc7,nextpnr",
+                   help="sintesi finale delle run passate")
+    g.add_argument("--no-warmup", action="store_true", help="niente warm-up dei modelli")
+    ep.add_argument("--campaign-budget-s", type=int, default=None,
+                    help="tempo massimo della campagna; oltre, i job rimanenti sono skipped_budget")
     ep.add_argument("--parallel", type=int, default=1, help="job in parallelo (Ollama serializza su GPU)")
     ep.add_argument("--retry-errors", action="store_true", help="rifà i job finiti in errore/timeout")
     ep.add_argument("--limit", type=int, default=None, help="esegue al più N job (prove)")
@@ -351,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
     ep.set_defaults(func=cmd_eval)
 
     pp = sub.add_parser("report", help="report di una campagna (anche incompleta)")
-    pp.add_argument("--dir", required=True, help="cartella della campagna")
+    pp.add_argument("path", nargs="?", default=None, help="cartella della campagna")
+    pp.add_argument("--dir", default=None, help="come path (forma precedente)")
     pp.set_defaults(func=cmd_report)
 
     a = p.parse_args(argv)

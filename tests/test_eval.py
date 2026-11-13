@@ -84,6 +84,9 @@ def test_shipped_campaigns_are_valid(tmp_path):
     for f in (ROOT / "configs" / "eval").glob("*.yaml"):
         c = load_campaign(f)
         assert jobs(c, tmp_path)
+    c = load_campaign(ROOT / "configs" / "eval" / "b04_b05.yaml")
+    js = jobs(c, tmp_path)
+    assert len(js) == 120 and {j.task for j in js} == {"b04_mxfp4_quantize", "b05_mxfp4_dot32"}
 
 
 # ------------------------------------------------- runner + report (finti)
@@ -112,11 +115,17 @@ class FakeExec:
             out = Path(args[args.index("--out") + 1])
             out.mkdir(parents=True, exist_ok=True)
             t = 100 if "--task" in args else 80
-            (out / "ppa.json").write_text(json.dumps({"results": {"generic": {
-                "ok": True, "metrics": {"transistors": t, "depth": 10}}}}))
+            (out / "ppa.json").write_text(json.dumps({"results": {
+                "generic": {"ok": True, "metrics": {"transistors": t, "depth": 10}},
+                "xc7": {"ok": True, "metrics": {"luts": t // 10, "ffs": 0}},
+                "nextpnr": {"ok": True, "metrics": {"fmax_mhz": 200.0, "fmax_min": 190.0}}}}))
             return Result(cmd, 0, "", "", 0.1)
         run_id = args[args.index("--run-id") + 1]
         if run_id in self.crash:
+            rd = Path(args[args.index("--runs-dir") + 1]) / run_id
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "result.json").write_text(json.dumps({"status": "interrupted",
+                                                        "reason": "signal SIGHUP"}))
             return Result(cmd, 2, "", "Traceback ...\nRuntimeError: boom", 0.1)
         task, mode, variant, _, s = run_id.split("__")
         seed = int(s[1:])
@@ -143,6 +152,7 @@ def test_runner_resume_errors_and_report(tmp_path):
     assert len(done) == 21
     st = r.status()
     assert st[crash]["status"] == "error" and "boom" in st[crash]["error"]
+    assert st[crash]["result_status"] == "interrupted" and "signal SIGHUP" in st[crash]["error"]
     assert st["b01_e2m1_decode__full__main__m__s0"]["ppa"] == "ok"
     assert st["b03_e8m0_to_fp32__baseline-a__main__m__s0"].get("ppa") == "not_passed"
     # ripresa: nulla da rifare, salvo gli errori su richiesta
@@ -170,6 +180,21 @@ def test_runner_resume_errors_and_report(tmp_path):
     assert "Campagna incompleta" in md and crash in md and "| b01_e2m1_decode | 0/2 | 1/3 | 3/3 |" in md
     rows = (tmp_path / "runs.csv").read_text().splitlines()
     assert len(rows) == 22 and rows[0].startswith("job,task,mode")
+    # media ± dev. std per (task, modelli, modalità)
+    st = {(r["task"], r["mode"]): r for r in S["stats"]}
+    assert len(S["stats"]) == 2 * 3  # 2 task x 3 modalità x 1 insieme di modelli
+    b01 = st[("b01_e2m1_decode", "full")]
+    assert (b01["runs"], b01["passed"], b01["pass@1"], b01["pass@5"]) == (3, 3, 1.0, None)
+    assert b01["adp"] == {"n": 3, "mean": 800.0, "std": 0.0}
+    assert b01["luts_xc7"]["mean"] == 8 and b01["fmax_mhz"]["mean"] == 200.0
+    assert b01["time_to_pass_s"] == {"n": 3, "mean": 10.0, "std": 0.0}
+    b03a = st[("b03_e8m0_to_fp32", "baseline-a")]
+    assert b03a["passed"] == 0 and b03a["adp"] == {"n": 0, "mean": None, "std": None}
+    assert b03a["tokens_total"] == {"n": 3, "mean": 5000.0, "std": 0.0}  # su tutte le run, non solo le passate
+    assert "## Media ± deviazione standard" in md and "800 ± 0" in md
+    assert "result.json: interrupted" in md
+    srows = (tmp_path / "stats.csv").read_text().splitlines()
+    assert len(srows) == 7 and "adp_mean" in srows[0] and "pass@1" in srows[0]
 
 
 def test_report_on_partial_campaign(tmp_path):
@@ -178,3 +203,177 @@ def test_report_on_partial_campaign(tmp_path):
     r.run(limit=4, log=lambda s: None)
     S = write_report(tmp_path)
     assert S["jobs"]["done"] == 4 and S["jobs"]["missing"] == 17
+
+
+# ------------------------------------------------- campagna da flag, budget, warm-up
+FLAGS = ["eval", "--tasks", "b04_mxfp4_quantize,b05_mxfp4_dot32",
+         "--configs", "full,baseline_a,baseline_b", "--model-profiles", "all14b,all32b",
+         "--seeds", "0", "--campaign-budget-s", "21600"]
+
+
+def test_flag_campaign_dry_run(tmp_path, capsys, monkeypatch):
+    from mxagent.cli import main
+    monkeypatch.chdir(ROOT)
+    assert main([*FLAGS, "--out", str(tmp_path / "eval_x"), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "12 job, 12 da eseguire" in out and "21600 s (6.0 h)" in out
+    assert "max_wall_s 1800 s, max_llm_calls 40, max_tokens 300000" in out
+    assert "al più 2 tentativi" in out and "12 x 1800 s = 6.0 h" in out
+    order = [ln.split()[1:4] for ln in out.splitlines() if ln.strip()[:3].strip(". ").isdigit()]
+    # prima tutto all14b, poi all32b; dentro ogni profilo prima b04 poi b05
+    assert [o[2] for o in order] == ["all14b"] * 6 + ["all32b"] * 6
+    assert [o[0][:3] for o in order[:6]] == ["b04"] * 3 + ["b05"] * 3
+    assert [o[1] for o in order[:3]] == ["full", "baseline-a", "baseline-b"]
+    assert "llm.profile=all14b" in out and "library.readonly=true" in out
+    assert not (tmp_path / "eval_x").exists()  # il dry-run non scrive nulla
+
+
+def test_flag_campaign_jobs_overrides(tmp_path):
+    from mxagent.cli import flag_campaign
+    c = flag_campaign(_parse([*FLAGS, "--out", str(tmp_path / "e")]), "e")
+    assert c.campaign_budget_s == 21600 and c.warmup and c.job_timeout_s == 2700
+    js = jobs(c, tmp_path)
+    full = dict(next(j for j in js if j.mode == "full").overrides)
+    base = dict(next(j for j in js if j.mode == "baseline-a").overrides)
+    assert full["llm.profile"] == "all14b" and full["library.readonly"] is True
+    assert full["synth.optimize_iters"] == 2 and full["budget.max_llm_calls"] == 40
+    assert base["llm.profile"] == "all14b" and "library.path" not in base
+
+
+def _parse(argv):
+    """Argomenti di ``mxagent eval`` dal parser vero, senza eseguire la campagna."""
+    from mxagent import cli
+    captured = {}
+
+    def fake(a):
+        captured["a"] = a
+        return 0
+    orig = cli.cmd_eval
+    cli.cmd_eval = fake
+    try:
+        cli.main(argv)
+    finally:
+        cli.cmd_eval = orig
+    return captured["a"]
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_campaign_budget_skips_remaining_jobs_and_warmup_is_free(tmp_path):
+    from mxagent.cli import flag_campaign
+    c = flag_campaign(_parse([*FLAGS[:-2], "--campaign-budget-s", "250", "--out", "x"]), "x")
+    c = c.model_copy(update={"ppa_backends": []})
+    clock, warm = Clock(), []
+
+    def ex(cmd, cwd, timeout):
+        clock.t += 100  # ogni job dura 100 s
+        rd = Path(cmd[cmd.index("--runs-dir") + 1]) / cmd[cmd.index("--run-id") + 1]
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "metrics.json").write_text(json.dumps({"passed": False}))
+        return Result(cmd, 1, "", "", 100)
+
+    def wu(models):
+        clock.t += 10_000  # il warm-up non conta nel budget
+        warm.append(sorted(set(models.values())))
+        return {m: {"ok": True, "seconds": 1} for m in set(models.values())}
+
+    r = Runner(c, tmp_path, repo=ROOT, executor=ex, warmup=wu, clock=clock)
+    log = []
+    r.run(log=log.append)
+    st = r.status()
+    order = [j.id for j in jobs(c, tmp_path)]
+    assert [st[j]["status"] for j in order] == ["done"] * 3 + ["skipped_budget"] * 9
+    assert "budget di campagna esaurito" in st[order[3]]["error"]
+    assert warm == [["nomic-embed-text", "qwen2.5-coder:14b"]]  # solo all14b è partito
+    assert (tmp_path / "warmup.jsonl").is_file()
+    # ripresa senza budget: i job skipped_budget si eseguono, con warm-up del 32b
+    r2 = Runner(c.model_copy(update={"campaign_budget_s": None}), tmp_path, repo=ROOT, executor=ex,
+                warmup=wu, clock=clock)
+    assert len(r2.pending()) == 9
+    r2.run(log=log.append)
+    assert all(e["status"] == "done" for e in r2.status().values())
+    assert warm[-1] == ["nomic-embed-text", "qwen2.5-coder:32b"]
+
+
+def test_shell_timeout_terminates(tmp_path):
+    import sys
+    from mxagent.util.shell import run
+    r = run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1, grace=5)
+    assert r.timed_out and r.seconds < 20
+
+
+def test_single_seed_summary_report(tmp_path):
+    """Campagna da 12 run con esiti sintetici noti: summary.csv/.md, notes.md, PNG,
+    nessun pass@k né intervallo di confidenza con n = 1."""
+    from mxagent.cli import flag_campaign
+    from mxagent.eval.summary import FIELDS
+    c = flag_campaign(_parse([*FLAGS[:-2], "--campaign-budget-s", "950", "--out", "x"]), "eval_t")
+    clock = Clock()
+
+    def ex(cmd, cwd, timeout):
+        if cmd[3] == "synth":  # sintesi del riferimento o del design di una run
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "ppa.json").write_text(json.dumps({"results": {
+                "generic": {"ok": True, "metrics": {"transistors": 500, "depth": 12, "cells": 120}},
+                "xc7": {"ok": True, "metrics": {"luts": 40, "ffs": 0}},
+                "ecp5": {"ok": True, "metrics": {"luts": 70, "ffs": 0}},
+                "nextpnr": {"ok": True, "metrics": {"fmax_mhz": 80.0, "fmax_mean": 81.5}}}}))
+            return Result(cmd, 0, "", "", 1)
+        clock.t += 100
+        rid = cmd[cmd.index("--run-id") + 1]
+        rd = Path(cmd[cmd.index("--runs-dir") + 1]) / rid
+        rd.mkdir(parents=True, exist_ok=True)
+        if rid.startswith("b05_mxfp4_dot32__baseline-b__main__all14b"):  # crash del processo
+            (rd / "result.json").write_text(json.dumps({"status": "interrupted",
+                                                        "reason": "signal SIGTERM"}))
+            return Result(cmd, -1, "", "killed", 100, timed_out=True)
+        ok = "__full__" in rid or "baseline-b" in rid
+        full = "__full__" in rid
+        res = {"status": "done" if ok else "failed", "reason": "pass" if ok else "max_iters",
+               "passed": ok, "pass_rate": 1.0 if ok else 0.25, "n_vectors": 3016,
+               "candidates_to_pass": 2 if ok else None, "reflect_rounds": 1,
+               "time_to_pass_s": 300.0 if ok else None, "wall_s": 400.0 if full else 200.0,
+               "llm_calls": 5, "tokens_in": 9000, "tokens_out": 1000,
+               "best_stage": "pass" if ok else "compile",
+               "first_error": None if ok else "scalac:type mismatch",
+               "ppa": {"gain": 0.125, "stop": "plateau"} if full else None}
+        (rd / "result.json").write_text(json.dumps(res))
+        (rd / "metrics.json").write_text(json.dumps({"passed": ok}))
+        return Result(cmd, 0 if ok else 1, "", "", 100)
+
+    out = tmp_path / "eval_t"
+    Runner(c, out, repo=ROOT, executor=ex, warmup=lambda m: {}, clock=clock).run(log=lambda s: None)
+    S = write_report(out)
+    # 950 s di budget: il decimo job parte a 900 s, gli ultimi due no
+    assert S["jobs"] == {"expected": 12, "done": 6, "failed": 3, "interrupted": 1, "skipped_budget": 2}
+    rows = list(__import__("csv").DictReader((out / "summary.csv").open(encoding="utf-8")))
+    assert list(rows[0]) == FIELDS and len(rows) == 12
+    r0 = rows[0]  # b04 full all14b
+    assert (r0["config"], r0["profile"], r0["status"], r0["passed"]) == ("full", "all14b", "done", "True")
+    assert r0["luts_xc7"] == "40" and r0["ffs_ecp5"] == "0" and r0["fmax_mean_mhz"] == "81.5"
+    assert r0["adp_generic"] == "6000" and r0["ppa_gain_pct"] == "12.5" and r0["ppa_stop"] == "plateau"
+    assert r0["candidates_to_pass"] == "2" and r0["reflect_rounds"] == "1"
+    ba = rows[1]  # baseline_a fallita: niente sintesi, niente PPA
+    assert ba["config"] == "baseline_a" and ba["luts_xc7"] == "" and ba["ppa_gain_pct"] == ""
+    crash = next(r for r in rows if r["job"].startswith("b05_mxfp4_dot32__baseline-b__main__all14b"))
+    assert crash["status"] == "interrupted"
+    assert [r["status"] for r in rows[-3:]] == ["done", "skipped_budget", "skipped_budget"]
+    md = (out / "summary.md").read_text(encoding="utf-8")
+    assert "n = 1 seed per combinazione" in md and "non statisticamente significativi" in md
+    assert "pass@" not in md.replace("pass@k", "") and "CI " not in md
+    assert "| full | all14b | 2 / 2 | 0 | 400 | 300 | 10000 |" in md
+    assert "| baseline_b | all32b | 1 / 1 | 1 |" in md
+    assert not (out / "report.md").exists() and not (out / "stats.csv").exists()
+    notes = (out / "notes.md").read_text(encoding="utf-8")
+    assert "b04_mxfp4_quantize · baseline_a · all14b · s0" in notes
+    assert "stadio: `compile`" in notes and "scalac:type mismatch" in notes
+    assert "budget di campagna esaurito" in notes and "signal SIGTERM" in notes
+    pytest.importorskip("matplotlib")
+    assert (out / "pass_rate.png").stat().st_size > 1000 and "pass_rate.png" in md

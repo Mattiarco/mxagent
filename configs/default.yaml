@@ -14,6 +14,19 @@ llm:
     escalate:  {model: "qwen2.5-coder:32b", temperature: 0.3, num_ctx: 16384}   # anti-loop
     optimizer: {model: "qwen2.5-coder:32b", temperature: 0.3, num_ctx: 16384}   # PPA (M5)
     embed:     {model: "nomic-embed-text", temperature: 0.0, num_ctx: 8192}     # RAG
+  # Profili di modello (--model-profile): impostano TUTTI i ruoli LLM, embed escluso.
+  # "mixed" coincide con i ruoli qui sopra (routing piccolo/grande).
+  profile: null
+  profiles:
+    all14b: {all: "qwen2.5-coder:14b"}
+    all32b: {all: "qwen2.5-coder:32b"}
+    mixed:
+      planner: "qwen2.5-coder:32b"
+      coder: "qwen2.5-coder:14b"
+      fixer: "qwen2.5-coder:14b"
+      reflector: "qwen2.5-coder:32b"
+      escalate: "qwen2.5-coder:32b"
+      optimizer: "qwen2.5-coder:32b"
 
 # Meccanismi del sistema completo (ognuno si spegne per le ablation di M6)
 agent:
@@ -70,6 +83,8 @@ synth:
   optimize_iters: 4
   min_gain: 0.01
   tolerance: 0.02
+  ppa_patience: 2       # tentativi di fila rifiutati/duplicati prima dello stop "plateau"
+  ppa_min_cells: 50     # sotto questa soglia (celle generic) il loop PPA è saltato: "too_small"
 
 # Semantica numerica (vedi mxagent/formats/numerics.py); i task possono sovrascriverla.
 numerics:
@@ -79,3 +94,5 @@ numerics:
   out_overflow: inf
 
 runs_dir: runs
+runs:
+  keep_build_artifacts: false   # true: tiene sbt/target e gli oggetti di Verilator (~40 MB/run)

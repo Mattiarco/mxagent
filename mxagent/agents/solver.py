@@ -15,12 +15,13 @@ from typing import Any
 from ..bench.task import Task
 from ..config import Config, ModelRole
 from ..formats.cards import format_card
-from ..llm.chat import ChatModel
+from ..llm.chat import BudgetExceeded, ChatModel
 from ..rag import kb
 from ..rag.library import Library
 from ..run.recorder import Recorder
 from ..verify.verifier import VerifyReport, Verifier
 from . import prompts
+from .dedup import DUPLICATE_NOTE, retry_temperature, source_hash
 from .extract import extract_scala
 
 
@@ -32,9 +33,27 @@ class AgentContext:
     library: Library | None
     seed: int
     task_name: str  # task della run (anti-leakage della libreria)
+    #: candidates = candidati verificati (compilati e simulati; esclusi no_code e duplicati);
+    #: reflect_rounds = cicli di correzione dopo la generazione iniziale (reflect o resample)
     counters: dict[str, int] = field(default_factory=lambda: {"candidates": 0, "sanitized": 0,
-                                                              "kb_hits": 0, "no_code": 0})
+                                                              "kb_hits": 0, "no_code": 0,
+                                                              "duplicates": 0, "reflect_rounds": 0})
     escalated: bool = False
+    #: candidati già verificati in questa run: hash normalizzato -> {tag, outcome}
+    seen: dict[str, dict] = field(default_factory=dict)
+
+    def seen_candidate(self, sources: dict[str, str]) -> dict | None:
+        return self.seen.get(source_hash(sources))
+
+    def remember(self, sources: dict[str, str], tag: str, outcome: str) -> None:
+        self.seen[source_hash(sources)] = {"tag": tag, "outcome": outcome}
+
+    def check_wall(self) -> None:
+        """Il tempo si controlla anche prima di ogni verifica, non solo prima delle
+        chiamate LLM: oltre ``max_wall_s`` non parte più nessun lavoro nuovo."""
+        b = getattr(self.llm, "budget", None)
+        if b is not None and b.wall >= b.max_wall_s:
+            raise BudgetExceeded(f"tempo esaurito ({b.wall:.0f}/{b.max_wall_s:.0f}s)", "max_wall_s")
 
     def role(self, name: str) -> ModelRole:
         roles = self.cfg.llm.roles
@@ -119,6 +138,7 @@ class ModuleSolver:
         self.attempts: list[Attempt] = []
         self.memory: list[str] = []
         self.escapes: list[str] = []
+        self._last_dup: dict | None = None
         # seed deterministico per modulo (hash() di Python è randomizzato fra processi)
         self._seed = ctx.seed * 1000 + zlib.crc32(task.top.encode()) % 997
 
@@ -151,7 +171,29 @@ class ModuleSolver:
         return self._seed
 
     # -------------------------------------------------------- valutazione
-    def _evaluate(self, text: str, origin: str, diagnosis: str = "") -> Attempt:
+    def _ask(self, role: str, system: str, user: str, *, tag: str, origin: str,
+             temperature: float | None = None, diagnosis: bool = False) -> Attempt | None:
+        """Chiede un candidato e lo valuta. Se è un duplicato di uno già verificato lo
+        rigenera UNA volta (temperatura +0.2 fino a 0.9, seed nuovo, nota nel prompt)."""
+        for retry in (False, True):
+            r = self.ctx.chat(role, system, user, seed=self._next_seed(), temperature=temperature,
+                              tag=tag + (":dedup" if retry else ""))
+            diag = ""
+            if diagnosis:
+                m = re.search(r"DIAGNOSIS:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
+                diag = m.group(1).strip().replace("\n", " ") if m else ""
+            a = self._evaluate(r.text, origin, diag)
+            if a is not None or retry:
+                return a
+            dup = self._last_dup or {}
+            base = temperature if temperature is not None else self.ctx.role(role).temperature
+            temperature = retry_temperature(base)
+            user = user + "\n\n" + DUPLICATE_NOTE.format(same_as=dup.get("tag"),
+                                                         outcome=dup.get("outcome"))
+        return None
+
+    def _evaluate(self, text: str, origin: str, diagnosis: str = "") -> Attempt | None:
+        """Verifica un candidato; None se è un duplicato (non compilato né simulato)."""
         ctx = self.ctx
         code = extract_scala(text, self.task.top)
         n = len(self.attempts)
@@ -169,17 +211,35 @@ class ModuleSolver:
         if self.extra:
             code = strip_classes(code, {_class_name(k) for k in self.extra})
         sources = {**self.extra, f"{self.task.top}.scala": code}
+        dup = ctx.seen_candidate(sources)
+        if dup is not None:
+            ctx.counters["duplicates"] += 1
+            self._last_dup = dup
+            ctx.rec.event("duplicate", module=self.task.top, origin=origin, same_as=dup["tag"],
+                          outcome=dup["outcome"])
+            return None
+        ctx.check_wall()
         ctx.counters["candidates"] += 1
-        rep = self.verifier.verify(sources, f"{self.task.top}_{n:02d}")
+        rep = self.verifier.verify(sources, self._tag(n))
+        ctx.remember(sources, rep.tag, "pass" if rep.passed else rep.stage)
         a = Attempt(rep, sources, origin, diagnosis)
         self.attempts.append(a)
-        ctx.rec.save_candidate(ctx.counters["candidates"], {f"{self.task.top}.scala": code})
+        ctx.rec.save_candidate(rep.tag, {f"{self.task.top}.scala": code}, {
+            "phase": self.kind, "module": self.task.top, "n": n, "origin": origin,
+            "stage": rep.stage, "passed": rep.passed, "pass_rate": (rep.sim or {}).get("pass_rate"),
+            "n_vectors": (rep.sim or {}).get("total"), "sanitized": fixes})
         ctx.rec.event("verify", module=self.task.top, n=n, origin=origin, stage=rep.stage,
                       passed=rep.passed, score=list(rep.score), sanitized=fixes,
                       error_keys=rep.error_keys, feedback=rep.feedback[:3000],
                       seconds=rep.seconds)
         self.memory.append(self._summary(a, n))
         return a
+
+    def _tag(self, n: int) -> str:
+        """Id del candidato (tag della verifica e cartella ``candidates/<id>``). Il top
+        integrato ha un prefisso suo: in una run con ripiego sul monolitico i due
+        solver dello stesso modulo non devono produrre id uguali."""
+        return f"{self.task.top}_{'int' if self.kind == 'integrate' else ''}{n:02d}"
 
     def _summary(self, a: Attempt, n: int) -> str:
         r = a.report
@@ -201,10 +261,9 @@ class ModuleSolver:
         role = self.ctx.role("coder")
         for i in range(n):
             t = min(1.2, role.temperature + temp_boost + (0.15 * i if n > 1 else 0.0))
-            r = self.ctx.chat("coder", system, user, seed=self._next_seed(), temperature=t,
-                              tag=f"{self.kind}:{self.task.top}:{origin}{i}")
-            a = self._evaluate(r.text, origin)
-            if a.report and a.report.passed:
+            a = self._ask("coder", system, user, temperature=t,
+                          tag=f"{self.kind}:{self.task.top}:{origin}{i}", origin=origin)
+            if a is not None and a.report and a.report.passed:
                 return
 
     def reflect(self) -> None:
@@ -231,10 +290,8 @@ class ModuleSolver:
                               interface=self.task.interface_text(), domain=self.ctx.domain(self.task),
                               code=code, feedback=fb, pitfalls=pit, memory=mem)
         role = "fixer" if rep.stage in ("compile", "lint") else "reflector"
-        r = self.ctx.chat(role, self.ctx.system_prompt(), user, seed=self._next_seed(),
-                          tag=f"{self.kind}:{self.task.top}:reflect")
-        m = re.search(r"DIAGNOSIS:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
-        self._evaluate(r.text, "reflect", m.group(1).strip().replace("\n", " ") if m else "")
+        self._ask(role, self.ctx.system_prompt(), user, tag=f"{self.kind}:{self.task.top}:reflect",
+                  origin="reflect", diagnosis=True)
 
     def _stuck(self, since: int) -> str | None:
         cfg = self.ctx.cfg.agent
@@ -283,11 +340,16 @@ class ModuleSolver:
                     if action == "resample":
                         self.generate(cfg.agent.best_of_n, temp_boost=0.4, origin="resample")
                         it += 1
+                        self.ctx.counters["reflect_rounds"] += 1
                         continue
             self.reflect()
             it += 1
+            self.ctx.counters["reflect_rounds"] += 1
         b = self.best
         passed = bool(b and b.report and b.report.passed)
+        self.ctx.rec.event("loop_stop", module=self.task.top, solver=self.kind,
+                           reason="pass" if passed else stop, reflect_rounds=it,
+                           max_reflect_rounds=self.max_iters, attempts=len(self.attempts))
         return SolveResult(self.task.top, passed, b, self.attempts, self.escapes,
                            "pass" if passed else stop)
 

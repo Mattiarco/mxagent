@@ -18,6 +18,7 @@ from ..rag import kb
 from ..synth.ppa import PPAReport, accept, objective
 from ..verify.verifier import Verifier
 from . import prompts
+from .dedup import DUPLICATE_NOTE, retry_temperature
 from .extract import extract_scala
 from .solver import AgentContext, strip_classes
 
@@ -29,13 +30,14 @@ _GOAL = {"area": "area", "delay": "logic depth (critical path)", "adp": "area x 
 @dataclass
 class PPAStep:
     n: int
-    outcome: str  # accepted | rejected | functional_fail | no_code | synth_fail
+    outcome: str  # accepted | rejected | functional_fail | no_code | synth_fail | duplicate
     detail: str
     primary: tuple[float, float] | None = None
+    tag: str | None = None  # tag della verifica (None se il candidato non è stato verificato)
 
     def to_dict(self) -> dict:
         return {"n": self.n, "outcome": self.outcome, "detail": self.detail,
-                "primary": list(self.primary) if self.primary else None}
+                "primary": list(self.primary) if self.primary else None, "tag": self.tag}
 
 
 @dataclass
@@ -46,6 +48,7 @@ class PPAResult:
     verilog: list[str]
     steps: list[PPAStep] = field(default_factory=list)
     stop: str = "iters"
+    best_tag: str | None = None  # tag della verifica del candidato accettato per ultimo
 
     @property
     def accepted(self) -> int:
@@ -62,6 +65,7 @@ class PPAResult:
                 "final": list(self.final) if self.final else None,
                 "objective_initial": obj(self.initial), "objective_final": obj(self.final),
                 "gain": gain, "tried": len(self.steps), "accepted": self.accepted, "stop": self.stop,
+                "best_tag": self.best_tag,
                 "steps": [s.to_dict() for s in self.steps]}
 
 
@@ -96,48 +100,119 @@ class PPAOptimizer:
         res = PPAResult(best, best, best_src, best_v)
         if best is None:
             res.stop = "no_primary_metric"
+            self._stop(res)
+            return res
+        cells = self._cells(start)
+        if self.cfg.ppa_min_cells and cells is not None and cells < self.cfg.ppa_min_cells:
+            res.stop = "too_small"  # niente da ottimizzare: si risparmiano LLM e sintesi
+            self._stop(res, cells=cells, min_cells=self.cfg.ppa_min_cells)
             return res
         history: list[str] = []
-        for i in range(self.cfg.optimize_iters):
-            self._seed += 1
-            try:
-                r = self.ctx.chat("optimizer", self.ctx.system_prompt(),
-                                  self._prompt(best_src[top_file], best_rep, history),
-                                  seed=self._seed, tag=f"ppa:{self.task.top}:{i}")
-            except BudgetExceeded as e:
-                res.stop = f"budget: {e}"
-                break
-            idea = re.search(r"IDEA:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
-            idea_s = idea.group(1).strip().replace("\n", " ")[:200] if idea else "(no idea given)"
-            code = extract_scala(r.text, self.task.top)
-            if code is None:
-                step = PPAStep(i, "no_code", "no Scala code in the answer")
-            else:
-                if self.ctx.cfg.agent.kb:
-                    code = kb.sanitize(code).code
-                if self.extra:
-                    code = strip_classes(code, {k.removesuffix(".scala") for k in self.extra})
-                cand = {**self.extra, top_file: code}
-                vr = self.verifier.verify(cand, f"{self.task.top}_ppa{i:02d}")
-                self.ctx.rec.write_text(f"candidates/ppa{i:02d}/{top_file}", code)
-                if not vr.passed:
-                    lines = [ln.strip() for ln in vr.feedback.splitlines() if ln.strip()]
-                    first = " ".join(lines[:2])[:240]  # intestazione + primo errore
-                    step = PPAStep(i, "functional_fail", f"{vr.stage}: {first}")
+        ideas: list[str] = []
+        stopped = False
+        streak = 0  # tentativi di fila senza miglioramento (rifiutati o duplicati)
+        n_iters = self.cfg.optimize_iters
+        for i in range(n_iters):
+            note, temp = "", None
+            for retry in (False, True):  # al più una rigenerazione se la proposta è un duplicato
+                self._seed += 1
+                try:
+                    r = self.ctx.chat("optimizer", self.ctx.system_prompt(),
+                                      self._prompt(best_src[top_file], best_rep, history) + note,
+                                      seed=self._seed, temperature=temp,
+                                      tag=f"ppa:{self.task.top}:{i}" + (":dedup" if retry else ""))
+                except BudgetExceeded as e:
+                    res.stop = f"budget: {e}"
+                    self.ctx.rec.event("budget_exhausted", limit=e.limit, detail=str(e), stage="PPA")
+                    stopped = True
+                    break
+                idea = re.search(r"IDEA:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
+                idea_s = idea.group(1).strip().replace("\n", " ")[:200] if idea else "(no idea given)"
+                code = extract_scala(r.text, self.task.top)
+                dup = None
+                if code is None:
+                    step = PPAStep(i, "no_code", "no Scala code in the answer")
                 else:
-                    pr = self.synth_fn(vr.verilog, f"ppa{i:02d}")
-                    p = pr.primary(self.cfg)
-                    if p is None:
-                        errs = "; ".join(f"{k}: {v.error}" for k, v in pr.results.items() if not v.ok)
-                        step = PPAStep(i, "synth_fail", errs[:300])
+                    if self.ctx.cfg.agent.kb:
+                        code = kb.sanitize(code).code
+                    if self.extra:
+                        code = strip_classes(code, {k.removesuffix(".scala") for k in self.extra})
+                    cand = {**self.extra, top_file: code}
+                    dup = self.ctx.seen_candidate(cand)
+                    if dup is not None:  # già valutato: niente compilazione, simulazione, sintesi
+                        self.ctx.counters["duplicates"] += 1
+                        step = PPAStep(i, "duplicate", f"identical to {dup['tag']} ({dup['outcome']})")
+                        self.ctx.rec.event("duplicate", module=self.task.top, origin="ppa", n=i,
+                                           same_as=dup["tag"], outcome=dup["outcome"])
                     else:
-                        ok, why = accept(best, p, self.cfg)
-                        step = PPAStep(i, "accepted" if ok else "rejected", why, p)
-                        if ok:
-                            best, best_src, best_v, best_rep = p, cand, list(vr.verilog), pr
-            res.steps.append(step)
-            history.append(f"attempt {i + 1}: {idea_s} -> {step.outcome}: {step.detail}")
-            self.ctx.rec.event("ppa", module=self.task.top, n=i, outcome=step.outcome,
-                               detail=step.detail, primary=list(step.primary) if step.primary else None)
+                        step, vlog, prep = self._evaluate(i, cand, code, best)
+                        if step.outcome == "accepted":
+                            best, best_src, best_v, best_rep = step.primary, cand, vlog, prep
+                            res.best_tag = step.tag
+                res.steps.append(step)
+                ideas.append(idea_s)
+                history.append(f"attempt {i + 1}: {idea_s} -> {step.outcome}: {step.detail}")
+                self.ctx.rec.event("ppa", module=self.task.top, n=i, outcome=step.outcome,
+                                   detail=step.detail, primary=list(step.primary) if step.primary else None)
+                if dup is None or retry:
+                    break
+                temp = retry_temperature(self.ctx.role("optimizer").temperature)
+                note = ("\n\n" + DUPLICATE_NOTE.format(same_as=dup["tag"], outcome=dup["outcome"])
+                        + "\nIDEAS ALREADY TRIED:\n" + "\n".join(f"- {x}" for x in ideas) + "\n")
+            if stopped:
+                break
+            last = res.steps[-1] if res.steps else None
+            if last is not None and last.outcome == "accepted":
+                streak = 0
+            elif last is not None and last.outcome in ("rejected", "duplicate"):
+                streak += 1
+            if streak >= self.cfg.ppa_patience and i < n_iters - 1:
+                res.stop = "plateau"
+                break
+        else:
+            res.stop = "iters_exhausted"
         res.final, res.sources, res.verilog = best, best_src, best_v
+        self._stop(res)
         return res
+
+    def _evaluate(self, i: int, cand: dict[str, str], code: str, best: tuple[float, float]
+                  ) -> tuple[PPAStep, list[str], PPAReport | None]:
+        """Verifica completa e, se corretto, sintesi primaria + regola di accettazione."""
+        top_file = f"{self.task.top}.scala"
+        tag = f"{self.task.top}_ppa{i:02d}"
+        vr = self.verifier.verify(cand, tag)
+        vlog: list[str] = []
+        pr: PPAReport | None = None
+        if not vr.passed:
+            lines = [ln.strip() for ln in vr.feedback.splitlines() if ln.strip()]
+            first = " ".join(lines[:2])[:240]  # intestazione + primo errore
+            step = PPAStep(i, "functional_fail", f"{vr.stage}: {first}", tag=tag)
+        else:
+            pr = self.synth_fn(vr.verilog, f"ppa{i:02d}")
+            p = pr.primary(self.cfg)
+            if p is None:
+                errs = "; ".join(f"{k}: {v.error}" for k, v in pr.results.items() if not v.ok)
+                step = PPAStep(i, "synth_fail", errs[:300], tag=tag)
+            else:
+                ok, why = accept(best, p, self.cfg)
+                step = PPAStep(i, "accepted" if ok else "rejected", why, p, tag=tag)
+                vlog = list(vr.verilog)
+        self.ctx.remember(cand, tag, step.outcome)
+        self.ctx.rec.save_candidate(tag, {top_file: code}, {
+            "phase": "ppa", "module": self.task.top, "n": i, "origin": "ppa", "stage": vr.stage,
+            "passed": vr.passed, "pass_rate": (vr.sim or {}).get("pass_rate"),
+            "n_vectors": (vr.sim or {}).get("total"), "outcome": step.outcome,
+            "primary": list(step.primary) if step.primary else None})
+        return step, vlog, pr
+
+    def _cells(self, rep: PPAReport) -> float | None:
+        r = rep.results.get(self.cfg.primary)
+        return (r.metrics or {}).get("cells") if r is not None and r.ok else None
+
+    def _stop(self, res: PPAResult, **extra) -> None:
+        """Perché il loop è finito: iters_exhausted, plateau, too_small, budget,
+        no_primary_metric."""
+        self.ctx.rec.event("ppa_stop", module=self.task.top, reason=res.stop,
+                           iters_done=len({s.n for s in res.steps}), iters_max=self.cfg.optimize_iters,
+                           accepted=res.accepted, duplicates=sum(s.outcome == "duplicate" for s in res.steps),
+                           **extra)

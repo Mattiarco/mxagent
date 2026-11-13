@@ -39,6 +39,8 @@ class SynthResult:
     error: str = ""
     skipped: bool = False  # strumento non disponibile: nessun numero, non è un fallimento
     log: str = ""  # percorso del log completo
+    #: misurato dentro il wrapper registrato generato automaticamente (synth/wrapper.py)
+    wrapped: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -139,11 +141,11 @@ def fpga_metrics(flow: str, cells: dict[str, int]) -> dict[str, float]:
     if flow == "ecp5":
         return {"luts": _sum(cells, r"LUT4"), "carry": _sum(cells, r"CCU2C"),
                 "muxes": _sum(cells, r"PFUMX|L6MUX21"), "dsp": _sum(cells, r"MULT18X18D|ALU54B"),
-                "ffs": _sum(cells, r"TRELLIS_FF")}
+                "bram": _sum(cells, r"DP16KD|PDPW16KD"), "ffs": _sum(cells, r"TRELLIS_FF")}
     if flow == "xc7":
         return {"luts": _sum(cells, r"LUT[1-6]"), "carry": _sum(cells, r"CARRY4"),
                 "muxes": _sum(cells, r"MUXF[78]"), "dsp": _sum(cells, r"DSP48E1"),
-                "ffs": _sum(cells, r"FD[A-Z]*")}
+                "bram": _sum(cells, r"RAMB(18|36)E1"), "ffs": _sum(cells, r"FD[A-Z]*")}
     return {}
 
 

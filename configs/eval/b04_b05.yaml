@@ -1,0 +1,28 @@
+# Valutazione dopo la revisione della run b01: b04 e b05, tre modalità, due modelli,
+# 10 seed per cella = 2 task x 3 modalità x 2 modelli x 10 seed = 120 run.
+# b01 è escluso: il prompt contiene già la tabella completa e anche la baseline passa.
+#
+# Tempo: ogni run ha max_wall_s = 1800 s di budget; nel caso peggiore la campagna
+# dura decine di ore. Si lancia in tmux e si riprende da dove si era fermata:
+#   tmux new -s eval
+#   source ~/.local/mxagent/env.sh
+#   mxagent doctor --synth                                     # backend disponibili
+#   mxagent eval --campaign configs/eval/b04_b05.yaml --dry-run # elenco dei job
+#   mxagent eval --campaign configs/eval/b04_b05.yaml           # esegue / riprende
+#   mxagent report --dir evals/b04_b05                          # report.md, stats.csv, runs.csv
+name: b04_b05
+config: configs/default.yaml       # budget identico per tutte le modalità
+tasks: [b04_mxfp4_quantize, b05_mxfp4_dot32]
+modes: [baseline-a, baseline-b, full]   # baseline_a = single-shot, baseline_b = loop con log grezzi
+seeds: 10
+seed_start: 0
+
+# Con `all` ogni ruolo usa lo stesso modello: baseline e sistema completo sono
+# confrontati a parità di modello (routing piccolo/grande spento in questa campagna).
+models:
+  qwen14b: {all: "qwen2.5-coder:14b"}
+  qwen32b: {all: "qwen2.5-coder:32b"}
+
+library: {policy: fresh}           # niente leakage e niente dipendenza dall'ordine
+# sintesi del design finale di ogni run passata (tutte le modalità): ADP, LUT/FF, Fmax
+ppa_backends: [generic, ecp5, xc7, nextpnr]

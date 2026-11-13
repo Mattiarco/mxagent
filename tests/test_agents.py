@@ -52,7 +52,7 @@ class FakeVerifier:
 
 
 def code(top, mark="// ok"):
-    return f"```scala\nimport chisel3._\nclass {top} extends RawModule {{ {mark} }}\n```"
+    return f"```scala\nimport chisel3._\nclass {top} extends RawModule {{ {mark}\n  val m = \"{mark}\" }}\n```"
 
 
 def orch(task, c, replies, tmp, library=None):
@@ -91,12 +91,15 @@ def test_decompose_integrate_and_library_reuse(tmp_path):
     m = o.run().metrics
     assert m["passed"] and m["strategy"] == "decompose"
     assert [b["module"] for b in m["blocks"]] == ["E2M1Mul", "AdderTree", "E8M0Pair", "FixedToFP32"]
-    assert m["states"] == ["PLAN", "BLOCK", "BLOCK", "BLOCK", "BLOCK", "INTEGRATE", "DONE"]
+    assert m["states"] == ["PLAN", "BLOCK", "BLOCK", "BLOCK", "BLOCK", "INTEGRATE", "FINAL", "DONE"]
     top_sources = log[-1][2]
     assert "class E2M1Mul" not in top_sources  # ridefinizione del submodulo rimossa
     integ = llm.requests[-1]["messages"][1]["content"]
     assert "VERIFIED SUBMODULES" in integ and "FixedToFP32" in integ and "y: Output(UInt(32.W))" in integ
     assert len(lib) == 5  # 4 blocchi + il top
+    # candidates/<id>: blocchi col nome del modulo, top integrato con prefisso "int"
+    cands = sorted(d.name for d in (o.rec.root / "candidates").iterdir())
+    assert cands == ["AdderTree_00", "E2M1Mul_00", "E8M0Pair_00", "FixedToFP32_00", "MXFP4Dot32_int00"]
 
     # seconda run su un altro task (anti-leakage: origin diverso): i blocchi si riusano senza LLM
     other = B05.model_copy(update={"name": "b05_variant"})
@@ -121,7 +124,7 @@ def test_library_excludes_current_task(tmp_path):
 
 def test_escape_ladder_resample_escalate_stop(tmp_path):
     c = cfg(**{"agent.decompose": False, "budget.max_fix_iters": 12, "agent.escape_after_repeats": 1})
-    replies = [code("E2M1Decode", "syntax")] * 12
+    replies = [code("E2M1Decode", f"syntax {i}") for i in range(12)]
     o, llm, _ = orch(B01, c, replies, tmp_path)
     m = o.run().metrics
     assert not m["passed"] and m["stop"] == "escape_stop" and m["escalated"]
@@ -143,7 +146,7 @@ def test_fallback_to_monolithic_when_block_fails(tmp_path):
     replies = [json.dumps(plan), code("Dec", "bug"), code("E2M1Decode")]
     o, _, _ = orch(B01, c, replies, tmp_path)
     m = o.run().metrics
-    assert m["passed"] and m["states"] == ["PLAN", "BLOCK", "FALLBACK", "MONOLITHIC", "DONE"]
+    assert m["passed"] and m["states"] == ["PLAN", "BLOCK", "FALLBACK", "MONOLITHIC", "FINAL", "DONE"]
 
 
 def test_structured_vs_raw_feedback_in_reflection(tmp_path):

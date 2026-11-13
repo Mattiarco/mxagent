@@ -3,9 +3,16 @@
     config.yaml     configurazione effettiva (dopo override)
     meta.json       task, modalità, seed, versioni toolchain, digest dei modelli, hash dei prompt
     trace.json      eventi in ordine: chiamate LLM (prompt, risposta, token) e verifiche
-    candidates/NN/  sorgenti di ogni iterazione
-    final/          sorgenti e Verilog del miglior candidato
-    metrics.json    metriche della run (dai tool, mai stimate)
+    candidates/<id>/  sorgenti di ogni candidato verificato + meta.json (id, fase, origine,
+                    stadio, pass rate); <id> è il tag della verifica (E2M1Decode_01,
+                    E2M1Decode_ppa00, it03 nelle baseline), lo stesso di selection.json
+    final/          design scelto: sorgenti, .sv, report.json (verifica rieseguita), ppa.json,
+                    selection.json (run superate; altrimenti solo il miglior tentativo)
+    metrics.json    metriche della run (dai tool, mai stimate); solo se la run arriva in fondo
+    result.json     esito SEMPRE presente: done | failed | interrupted (vedi run/result.py)
+
+A fine run gli artefatti di build (sbt/target, oggetti di Verilator) si cancellano,
+salvo ``runs.keep_build_artifacts: true`` (vedi run/cleanup.py).
 """
 from __future__ import annotations
 
@@ -22,8 +29,9 @@ from .. import __version__
 from .. import versions as V
 
 
-def new_run_id(task: str, mode: str, model: str, seed: int) -> str:
-    m = re.sub(r"[^\w.-]", "-", model)
+def new_run_id(task: str, mode: str, profile: str, seed: int) -> str:
+    """``<data>_<task>_<modalità>_<profilo di modello>_s<seed>`` (profilo: all14b, mixed, ...)."""
+    m = re.sub(r"[^\w.-]", "-", profile)
     return f"{datetime.now():%Y%m%d-%H%M%S}_{task}_{mode}_{m}_s{seed}"
 
 
@@ -57,9 +65,13 @@ class Recorder:
                           "scala": V.SCALA_VERSION, "sbt": V.SBT_VERSION},
             "started": datetime.now().isoformat(timespec="seconds"), **data})
 
-    def save_candidate(self, it: int, sources: dict[str, str]) -> None:
+    def save_candidate(self, cid: str, sources: dict[str, str], meta: dict[str, Any] | None = None
+                       ) -> None:
+        """``candidates/<cid>/``: sorgenti e ``meta.json``. ``cid`` è il tag della verifica,
+        così la cartella ha lo stesso id del candidato in trace e selection.json."""
         for name, code in sources.items():
-            self.write_text(f"candidates/{it:02d}/{name}", code)
+            self.write_text(f"candidates/{cid}/{name}", code)
+        self.write_json(f"candidates/{cid}/meta.json", {"id": cid, **(meta or {})})
 
     def save_final(self, sources: dict[str, str], verilog: list[str]) -> None:
         for name, code in sources.items():

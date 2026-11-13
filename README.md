@@ -79,11 +79,13 @@ mxagent golden dot --a 2 --b 7 --a-scale 130    # dot di due blocchi -> FP32
 mxagent golden quant --x 1.0,-2.5,7.0,...       # FP32 -> blocco MXFP4
 mxagent verify --task benchmarks/b02_e2m1_mul  # verifica il riferimento (o --sources X.scala)
 mxagent run --task benchmarks/b01_e2m1_decode --mode baseline-b --model qwen2.5-coder:7b --seed 0
+mxagent run --task benchmarks/b01_e2m1_decode --model-profile all14b   # 14B per tutti i ruoli
 mxagent synth --task benchmarks/b05_mxfp4_dot32  # PPA del riferimento (verificato prima)
 mxagent synth --run runs/<id> --backends generic,ecp5,nextpnr   # PPA del design di una run
 mxagent wrap                                    # coprocessore CV-X-IF del MAC (b08) e test di protocollo
 mxagent eval --campaign configs/eval/main.yaml  # campagna (baseline, full, ablation), riprendibile
-mxagent report --dir evals/main                 # tabelle, CI di Wilson, McNemar, PPA
+mxagent report evals/main                       # tabelle, CI di Wilson, McNemar, PPA
+mxagent eval --tasks b04_mxfp4_quantize --configs full,baseline_a --model-profiles all14b \n  --seeds 0 --campaign-budget-s 21600 --out runs/eval_<data> --dry-run   # senza YAML (docs/eval.md)
 make test                                       # test (quelli d'integrazione richiedono la toolchain)
 ```
 
@@ -98,15 +100,38 @@ Ogni `mxagent run` produce `runs/<id>/` (o `$MXAGENT_RUNS/<id>/`):
 | `config.yaml` | configurazione effettiva |
 | `meta.json` | task, modalità, seed, digest del modello, hash dei prompt, versioni toolchain |
 | `trace.json` | ogni chiamata LLM (prompt, risposta, token, tempo) e ogni verifica |
-| `candidates/NN/` | sorgenti di ogni iterazione |
+| `candidates/<id>/` | sorgenti di ogni candidato verificato e `meta.json` (id, fase, origine, stadio, pass rate); `<id>` è quello di trace e `selection.json` (`E2M1Decode_01`, `E2M1Decode_ppa00`, `it03`) |
 | `final/` | miglior candidato: sorgenti Chisel e Verilog emesso |
 | `verify/` | log e `report.json` del verifier per iterazione |
 | `metrics.json` | esito, iterazioni, tempo fino alla correttezza, token, errori ripetuti, PPA |
 | `ppa.json`, `ppa/` | sintesi del design corretto e di quello ottimizzato, passi del PPA Optimizer |
 | `final_functional/` | design corretto prima del PPA Optimizer (solo se questo l'ha migliorato) |
 
+`result.json` è sempre presente (anche per run fallite o interrotte) e conta le
+iterazioni in due modi distinti:
+
+| campo | definizione |
+|---|---|
+| `candidates_to_pass` | candidati **verificati** (compilati e simulati) fino al primo pass compreso, blocchi del catalogo inclusi; esclusi le risposte senza codice e i duplicati. `null` se la run non passa |
+| `reflect_rounds` | **cicli di correzione** dopo la generazione iniziale: riflessioni sul feedback e ricampionamenti dell'anti-loop (nelle baseline: chiamate con il feedback della precedente). Il best-of-N iniziale non conta |
+| `candidates`, `no_code` | candidati verificati in tutto e risposte senza codice |
+
+Esempio: best-of-3 con il terzo che passa dà `candidates_to_pass: 3`, `reflect_rounds: 0`;
+un candidato sbagliato corretto da due riflessioni dà `3` e `2`. Lo stesso
+`reflect_rounds` è nell'evento `loop_stop` del trace, per solver.
+
+A fine comando `run`, `verify`, `synth` e `wrap` cancellano gli artefatti di build
+(`sbt/target`, `.bsp`, oggetti di Verilator) anche in `runs/verify/<task>/`;
+`--keep-build` (o `runs.keep_build_artifacts: true`) li tiene.
+
 Le risposte del modello sono in cache (`.cache/llm`, chiave = modello + digest +
 messaggi + opzioni): una run rieseguita con gli stessi parametri è identica.
+
+Modelli: `--model-profile all14b | all32b | mixed` imposta il modello di tutti i
+ruoli LLM (`embed` escluso) secondo `llm.profiles` della config; `--model X` è la
+scorciatoia per un profilo uniforme. Il nome della run e `meta.json` riportano il
+profilo (`..._full_all14b_s0`), `result.json` i modelli effettivi in `models_by_role`.
+La config di default senza profilo è `mixed` (14B per coder/fixer, 32B per gli altri).
 
 Modalità: `full` (sistema completo, [docs/agent.md](docs/agent.md)), `baseline-a`
 (single-shot, prompt ingenuo) e `baseline-b` (loop generico con log grezzi e storia

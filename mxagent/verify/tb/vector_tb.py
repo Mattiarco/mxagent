@@ -37,7 +37,8 @@ def _clock(sig, period_ns: int = 10):
 
 @cocotb.test()
 async def run_vectors(dut):
-    spec = json.loads(open(os.environ["MXAGENT_VECTORS"], encoding="utf-8").read())
+    with open(os.environ["MXAGENT_VECTORS"], encoding="utf-8") as f:
+        spec = json.load(f)
     ins = [getattr(dut, n) for n in spec["inputs"]]
     outs = [getattr(dut, n) for n in spec["outputs"]]
     vecs = spec["vectors"]

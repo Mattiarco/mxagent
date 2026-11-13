@@ -61,11 +61,12 @@ def opensta(files: list[Path], top: str, work: Path, liberty: str | None,
 def parse_vivado_util(text: str) -> dict[str, float]:
     out: dict[str, float] = {}
     pats = {"luts": r"(?:Slice|CLB) LUTs\*?", "ffs": r"(?:Slice|CLB) Registers",
-            "carry": r"CARRY[48]", "dsp": r"DSPs", "muxes": r"F7 Muxes"}
+            "carry": r"CARRY[48]", "dsp": r"DSPs", "muxes": r"F7 Muxes", "bram": r"Block RAM Tile"}
     for key, pat in pats.items():
-        m = re.search(rf"^\|\s*{pat}\s*\|\s*(\d+)", text, re.M)
+        m = re.search(rf"^\|\s*{pat}\s*\|\s*(\d+(?:\.\d+)?)", text, re.M)
         if m:
-            out[key] = int(m.group(1))
+            v = float(m.group(1))
+            out[key] = int(v) if v.is_integer() else v  # le BRAM possono essere mezze (RAMB18)
     return out
 
 
@@ -111,7 +112,8 @@ def vivado(files: list[Path], task: Task, work: Path, *, part: str, clock_ns: fl
         return res
     crit = clock_ns - wns
     # le risorse includono i registri del wrapper (shift register e uscite)
-    res.metrics = {**util, "wns_ns": wns, "crit_ns": round(crit, 3),
-                   "fmax_mhz": round(1000.0 / crit, 2) if crit > 0 else 0.0}
+    res.metrics = {**util, "wns_ns": wns, "slack_ns": wns, "clock_ns": clock_ns,
+                   "crit_ns": round(crit, 3), "fmax_mhz": round(1000.0 / crit, 2) if crit > 0 else 0.0}
+    res.wrapped = True
     res.ok = True
     return res

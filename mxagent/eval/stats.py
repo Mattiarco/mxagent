@@ -49,6 +49,13 @@ def iqr(xs: Iterable[float | None]) -> tuple[float, float] | None:
     return (q[0], q[2])
 
 
+def mean_std(xs: Iterable[float | None]) -> dict:
+    """n, media e deviazione standard campionaria (None con meno di 2 valori)."""
+    v = [float(x) for x in xs if x is not None]
+    return {"n": len(v), "mean": statistics.fmean(v) if v else None,
+            "std": statistics.stdev(v) if len(v) >= 2 else None}
+
+
 def geomean(xs: Iterable[float | None]) -> float | None:
     v = [x for x in xs if x is not None and x > 0]
     return math.exp(sum(math.log(x) for x in v) / len(v)) if v else None
