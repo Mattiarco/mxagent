@@ -120,6 +120,8 @@ class Task(BaseModel):
     # riempiti dal loader
     root: Path | None = Field(None, exclude=True)
     spec_text: str = Field("", exclude=True)
+    #: scheda di dominio propria (blocchi del catalogo); None = scheda del formato del task
+    domain_text: str | None = Field(None, exclude=True)
 
     @model_validator(mode="after")
     def _ports(self) -> "Task":

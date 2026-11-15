@@ -25,6 +25,22 @@ from .dedup import DUPLICATE_NOTE, retry_temperature, source_hash
 from .extract import extract_scala
 
 
+def log_llm_call(rec: Recorder, resp, **data: Any) -> None:
+    """Evento ``llm`` (esito, token, latenza, timeout, costo) e un evento ``llm_timeout``
+    per ogni tentativo scaduto, con il ``tag`` che identifica blocco/fase/iterazione.
+    Una chiamata con tutti i tentativi scaduti ha ``error: "timeout"`` e testo vuoto:
+    la pipeline la tratta come un candidato senza codice (tentativo fallito)."""
+    for i, s in enumerate(resp.timeouts):
+        rec.event("llm_timeout", error="timeout", seconds=s, attempt=i + 1,
+                  **{k: data.get(k) for k in ("role", "model", "tag", "iter", "seed")
+                     if data.get(k) is not None})
+    rec.event("llm", **data, response=resp.text, tokens=[resp.prompt_tokens, resp.completion_tokens],
+              seconds=round(resp.seconds, 2), cached=resp.cached,
+              outcome=resp.error or "ok", error=resp.error or None, attempts=resp.attempts,
+              timeouts=len(resp.timeouts), done_reason=resp.done_reason,
+              cost_usd=resp.cost_usd, **({"notes": resp.notes} if resp.notes else {}))
+
+
 @dataclass
 class AgentContext:
     cfg: Config
@@ -71,9 +87,7 @@ class AgentContext:
         resp = self.llm.chat([{"role": "system", "content": system}, {"role": "user", "content": user}],
                              model=r.model, temperature=r.temperature if temperature is None else temperature,
                              num_ctx=r.num_ctx, num_predict=r.num_predict, seed=seed, format=fmt, tag=tag)
-        self.rec.event("llm", role=role, model=r.model, tag=tag, seed=seed, prompt=user,
-                       response=resp.text, tokens=[resp.prompt_tokens, resp.completion_tokens],
-                       seconds=round(resp.seconds, 2), cached=resp.cached)
+        log_llm_call(self.rec, resp, role=role, model=r.model, tag=tag, seed=seed, prompt=user)
         return resp
 
     def system_prompt(self) -> str:
@@ -81,9 +95,17 @@ class AgentContext:
         return prompts.render("full/system", rules=rules)
 
     def domain(self, task: Task) -> str:
+        """Conoscenza di dominio del prompt di ``task`` (generazione, retry, reflect).
+
+        Un blocco del catalogo ha una scheda SUA (``task.domain_text``: solo i fatti
+        che servono a quel blocco, parametri e semantica numerica già esplicitati);
+        la scheda del formato del task padre non entra mai nel prompt di un blocco."""
         if not self.cfg.agent.format_card:
             return ""
-        return "DOMAIN KNOWLEDGE (verified, follow it exactly)\n" + format_card(num=task.numerics_obj) + "\n"
+        card = task.domain_text if task.domain_text is not None else format_card(num=task.numerics_obj)
+        if not card:
+            return ""
+        return "DOMAIN KNOWLEDGE (verified, follow it exactly)\n" + card + "\n"
 
 
 @dataclass
@@ -92,6 +114,8 @@ class Attempt:
     sources: dict[str, str]
     origin: str  # gen | reflect | resample | reuse
     diagnosis: str = ""
+    #: ordine di verifica nella run (counters["candidates"]): "iterazione" del candidato
+    seq: int = 0
 
 
 @dataclass
@@ -182,7 +206,7 @@ class ModuleSolver:
             if diagnosis:
                 m = re.search(r"DIAGNOSIS:\s*(.+?)(?:\n\s*\n|```|$)", r.text, re.S)
                 diag = m.group(1).strip().replace("\n", " ") if m else ""
-            a = self._evaluate(r.text, origin, diag)
+            a = self._evaluate(r.text, origin, diag, llm_error=r.error)
             if a is not None or retry:
                 return a
             dup = self._last_dup or {}
@@ -192,15 +216,18 @@ class ModuleSolver:
                                                          outcome=dup.get("outcome"))
         return None
 
-    def _evaluate(self, text: str, origin: str, diagnosis: str = "") -> Attempt | None:
-        """Verifica un candidato; None se è un duplicato (non compilato né simulato)."""
+    def _evaluate(self, text: str, origin: str, diagnosis: str = "",
+                  llm_error: str = "") -> Attempt | None:
+        """Verifica un candidato; None se è un duplicato (non compilato né simulato).
+        Una chiamata scaduta (``llm_error``) è un tentativo senza codice."""
         ctx = self.ctx
         code = extract_scala(text, self.task.top)
         n = len(self.attempts)
         if code is None:
             ctx.counters["no_code"] += 1
             a = Attempt(None, {}, origin, diagnosis)
-            self.ctx.rec.event("verify", module=self.task.top, n=n, origin=origin, stage="no_code")
+            self.ctx.rec.event("verify", module=self.task.top, n=n, origin=origin, stage="no_code",
+                               **({"llm_error": llm_error} if llm_error else {}))
             self.attempts.append(a)
             return a
         fixes: list[str] = []
@@ -222,7 +249,7 @@ class ModuleSolver:
         ctx.counters["candidates"] += 1
         rep = self.verifier.verify(sources, self._tag(n))
         ctx.remember(sources, rep.tag, "pass" if rep.passed else rep.stage)
-        a = Attempt(rep, sources, origin, diagnosis)
+        a = Attempt(rep, sources, origin, diagnosis, seq=ctx.counters["candidates"])
         self.attempts.append(a)
         ctx.rec.save_candidate(rep.tag, {f"{self.task.top}.scala": code}, {
             "phase": self.kind, "module": self.task.top, "n": n, "origin": origin,

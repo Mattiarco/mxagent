@@ -19,14 +19,16 @@ from typing import Any
 
 from ..agents import prompts
 from ..agents.extract import extract_scala
+from ..agents.solver import log_llm_call
 from ..bench.task import Task
 from ..config import Config, ModelRole, profile_label
-from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat
+from ..llm.chat import Budget, BudgetExceeded, ChatModel, describe_llm, make_chat, model_digest
 from ..verify.verifier import VerifyReport, Verifier
+from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     write_result)
+                     llm_result_fields, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b")
@@ -73,7 +75,7 @@ def _fit_history(messages: list[dict[str, str]], num_ctx: int, reserve: int) -> 
 def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
              runs_dir: Path, llm: ChatModel | None = None, verify_fn: VerifyFn | None = None,
              verifier: Verifier | None = None, budget: Budget | None = None,
-             run_id: str | None = None) -> RunResult:
+             run_id: str | None = None, synth_fn: _best.SynthFn | None = None) -> RunResult:
     st = settings_for(mode, cfg)
     budget = budget or Budget(cfg.budget.max_llm_calls, cfg.budget.max_tokens, cfg.budget.max_wall_s)
     profile, mism = profile_label(cfg, mode)
@@ -84,15 +86,15 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     rec = Recorder(Path(runs_dir) / run_id)
     rec.write_text("config.yaml", cfg.dump())
     names = [f"{st.prompt_set}/system", f"{st.prompt_set}/task", f"{st.prompt_set}/fix"]
-    if llm is None:
-        llm = OllamaChat(cfg.llm.host, cfg.llm.cache_dir, cfg.llm.timeout_s, cfg.llm.max_retries,
-                         budget=budget)
+    if llm is None:  # backend della config (ollama | anthropic): stessa interfaccia
+        llm = make_chat(cfg.llm, budget=budget)
     elif getattr(llm, "budget", None) is None:
         llm.budget = budget  # type: ignore[attr-defined]
     budget = getattr(llm, "budget", None) or budget
-    digest = llm.digest(role.model) if isinstance(llm, OllamaChat) else "scripted"
+    digest = model_digest(llm, role.model)
     rec.meta(task=task.name, mode=mode, seed=seed, model=role.model, model_profile=profile,
              models_by_role=models_by_role, model_digest=digest,
+             llm_backend=describe_llm(llm, {"coder": role}),
              role=role.model_dump(), prompts=prompts.fingerprint(*names),
              settings=st.__dict__, numerics=task.numerics_obj.to_dict())
     check_models(rec, profile, mism)
@@ -120,6 +122,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     no_code = repeated = truncations = 0
     prev_keys: list[str] | None = None
     outcome: dict = {"status": "failed", "reason": "run non terminata"}
+    cands: list[_best.Candidate] = []  # ogni candidato verificato, per best/
+    best_info: dict | None = None
+    t_end: list[float] = []  # fine del lavoro (prima della sintesi di best/)
 
     def write_res() -> None:
         """result.json con lo stato corrente (le variabili sono lette alla chiamata)."""
@@ -137,9 +142,12 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "candidates": len(reports), "no_code": no_code,
                 "candidates_to_pass": cands_to_pass, "reflect_rounds": rounds,
                 "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
-                "wall_s": round(time.monotonic() - t0, 1), "llm_calls": bud["calls"],
+                "wall_s": round((t_end[0] if t_end else time.monotonic()) - t0, 1),
+                "llm_calls": bud["calls"],
                 "tokens_in": bud["prompt_tokens"], "tokens_out": bud["completion_tokens"],
-                "llm_by_role": llm_by_role(rec.events), "duplicates": 0, "ppa": None})
+                "llm_by_role": llm_by_role(rec.events), **llm_result_fields(llm, bud),
+                "solution": (best_info or {}).get("solution", "none"), "best": best_info,
+                "duplicates": 0, "ppa": None})
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
             rec.event("result_error", error=f"{type(e).__name__}: {e}")
 
@@ -152,14 +160,14 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                     r = llm.chat(messages, model=role.model, temperature=role.temperature,
                                  num_ctx=role.num_ctx, num_predict=role.num_predict,
                                  seed=seed + it, tag=f"{mode}:{it}")
-                    rec.event("llm", iter=it, messages=messages[-1:] if it else messages,
-                              response=r.text, tokens=[r.prompt_tokens, r.completion_tokens],
-                              seconds=round(r.seconds, 2), cached=r.cached, done_reason=r.done_reason)
+                    log_llm_call(rec, r, role="coder", model=role.model, tag=f"{mode}:{it}",
+                                 iter=it, messages=messages[-1:] if it else messages)
                     code = extract_scala(r.text, task.top)
-                    if code is None:
+                    if code is None:  # anche una chiamata scaduta (r.error): tentativo fallito
                         no_code += 1
                         fb = "No ```scala code block was found in your answer."
-                        rec.event("verify", iter=it, stage="no_code", passed=False)
+                        rec.event("verify", iter=it, stage="no_code", passed=False,
+                                  **({"llm_error": r.error} if r.error else {}))
                     else:
                         sources = {f"{task.top}.scala": code}
                         if budget.wall >= budget.max_wall_s:  # niente verifiche oltre il tempo
@@ -167,6 +175,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                                                  f"{budget.max_wall_s:.0f}s)", "max_wall_s")
                         rep = verify_fn(sources, f"it{it:02d}")
                         reports.append(rep)
+                        cands.append(_best.Candidate(rep.tag, sources, rep, seq=len(reports),
+                                                     phase=mode, origin="gen" if it == 0 else "fix"))
                         rec.save_candidate(rep.tag, sources, {
                             "phase": mode, "module": task.top, "n": it,
                             "origin": "gen" if it == 0 else "fix", "stage": rep.stage,
@@ -195,15 +205,18 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             if best:
                 rec.save_final(best[1], best[0].verilog)
             b = best[0] if best else None
+            t_end.append(time.monotonic())
+            best_info = _baseline_best(rec, cfg, task, cands, synth_fn)
             metrics = {
                 "task": task.name, "mode": mode, "model": role.model, "seed": seed,
                 "passed": stop == "pass", "stop": stop,
                 "iterations": len(reports) + no_code, "candidates_to_pass": cands_to_pass,
                 "reflect_rounds": rounds,
                 "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
-                "wall_s": round(time.monotonic() - t0, 1),
+                "wall_s": round(t_end[0] - t0, 1),
                 "best_stage": b.stage if b else "no_code",
                 "best_pass_rate": b.sim.get("pass_rate", 0.0) if b else 0.0,
+                "solution": best_info.get("solution"), "best": best_info,
                 "stages": [r.stage for r in reports],
                 "no_code": no_code, "repeated_errors": repeated, "history_truncations": truncations,
                 "llm": budget.to_dict(),
@@ -226,3 +239,28 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 except Exception as e:  # noqa: BLE001 - la pulizia non deve far fallire la run
                     rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
             write_res()
+
+
+def _baseline_best(rec: Recorder, cfg: Config, task: Task, cands: list,
+                   synth_fn: "_best.SynthFn | None") -> dict:
+    """``best/`` delle baseline: stesso criterio del sistema completo (run/best.py).
+    Non deve mai far fallire la run."""
+    try:
+        s = cfg.synth
+        if synth_fn is None and s.backends:
+            from ..synth.ppa import synthesize
+
+            def synth_fn(verilog: list[str], tag: str) -> dict | None:
+                rep = synthesize(verilog, task, s, rec.root / "best_synth" / tag,
+                                 backends=[s.primary])
+                return rep.summary().get(s.primary)
+        b = _best.select_best(cands, synth_fn)
+        sol = "complete" if b is not None and b.report.passed else "partial"
+        info = _best.write_best(rec.root, b, sol, s.primary, ranking=cands)
+    except Exception as e:  # noqa: BLE001
+        rec.event("best_error", error=f"{type(e).__name__}: {e}")
+        info = {"solution": "none", "error": f"{type(e).__name__}: {e}"[:300]}
+    rec.event("best", **{k: v for k, v in info.items()
+                         if k in ("solution", "tag", "iteration", "tests_passed", "tests_total",
+                                  "stage")})
+    return info

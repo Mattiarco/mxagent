@@ -80,6 +80,8 @@ mxagent golden quant --x 1.0,-2.5,7.0,...       # FP32 -> blocco MXFP4
 mxagent verify --task benchmarks/b02_e2m1_mul  # verifica il riferimento (o --sources X.scala)
 mxagent run --task benchmarks/b01_e2m1_decode --mode baseline-b --model qwen2.5-coder:7b --seed 0
 mxagent run --task benchmarks/b01_e2m1_decode --model-profile all14b   # 14B per tutti i ruoli
+mxagent run --task benchmarks/b01_e2m1_decode --backend anthropic --model claude-sonnet-5-5  # cloud ($ANTHROPIC_API_KEY)
+python scripts/compare_backends.py --n 10 --out runs/compare_<data>   # Ollama vs Claude: CSV + compare.md
 mxagent synth --task benchmarks/b05_mxfp4_dot32  # PPA del riferimento (verificato prima)
 mxagent synth --run runs/<id> --backends generic,ecp5,nextpnr   # PPA del design di una run
 mxagent wrap                                    # coprocessore CV-X-IF del MAC (b08) e test di protocollo
@@ -106,6 +108,7 @@ Ogni `mxagent run` produce `runs/<id>/` (o `$MXAGENT_RUNS/<id>/`):
 | `metrics.json` | esito, iterazioni, tempo fino alla correttezza, token, errori ripetuti, PPA |
 | `ppa.json`, `ppa/` | sintesi del design corretto e di quello ottimizzato, passi del PPA Optimizer |
 | `final_functional/` | design corretto prima del PPA Optimizer (solo se questo l'ha migliorato) |
+| `best/` | miglior candidato anche se nessuno passa: sorgenti, Verilog, `report.json` (soluzione `complete`/`partial`, test passati/totali, sintesi, iterazione); criterio in [`run/best.py`](mxagent/run/best.py) |
 
 `result.json` è sempre presente (anche per run fallite o interrotte) e conta le
 iterazioni in due modi distinti:
@@ -123,6 +126,13 @@ un candidato sbagliato corretto da due riflessioni dà `3` e `2`. Lo stesso
 A fine comando `run`, `verify`, `synth` e `wrap` cancellano gli artefatti di build
 (`sbt/target`, `.bsp`, oggetti di Verilator) anche in `runs/verify/<task>/`;
 `--keep-build` (o `runs.keep_build_artifacts: true`) li tiene.
+
+Backend LLM: `--backend ollama|anthropic` (o `llm.backend`); stessa interfaccia, stessi prompt,
+stessa cache, stessi retry. Ogni chiamata ha un timeout (`--llm-timeout` o `llm.timeout_s`; default
+300 s Ollama, 120 s cloud): scaduti tutti i tentativi, la chiamata conta come candidato fallito
+(evento `llm_timeout` nel trace, `llm_timeouts` in `result.json`) e la run prosegue. Gli adattamenti
+del backend cloud (temperatura e seed non inviati, formato JSON) sono descritti in
+[`llm/anthropic_chat.py`](mxagent/llm/anthropic_chat.py) e registrati in `meta.json` (`llm_backend`).
 
 Le risposte del modello sono in cache (`.cache/llm`, chiave = modello + digest +
 messaggi + opzioni): una run rieseguita con gli stessi parametri è identica.

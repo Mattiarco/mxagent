@@ -17,8 +17,10 @@ from typing import Any
 
 from ..formats import fp
 from ..formats import golden as g
+from ..formats.cards import E2M1_ELEMENT, E8M0_SCALE, FP32_LAYOUT, e2m1_table
+from ..formats.fp import Subnormals
 from ..formats.numerics import Numerics
-from ..formats.packing import pack, to_signed, to_unsigned, unpack
+from ..formats.packing import CONVENTION, pack, to_signed, to_unsigned, unpack
 from ..formats.specs import E2M1, FP32
 from .kernels import KERNELS, Kernel, Vec
 
@@ -32,6 +34,10 @@ class Block:
     kernel: Kernel
     defaults: dict[str, Any] = field(default_factory=dict)
     exhaustive: Callable[[dict[str, Any]], bool] = lambda p: False
+    #: scheda di dominio del blocco (parametri, semantica numerica) -> testo per il Coder.
+    #: Contiene SOLO i fatti che servono al blocco: la scheda del task padre non entra
+    #: mai nel prompt di un blocco (vedi AgentContext.domain).
+    card: Callable[[dict[str, Any], Numerics], str] = lambda p, num: ""
 
     def params(self, p: dict[str, Any] | None) -> dict[str, Any]:
         out = {**self.defaults, **(p or {})}
@@ -182,6 +188,44 @@ def _qel_rand(rng: random.Random, p: dict) -> Vec:
     return {"x": _f32_round(x), "shared": to_unsigned(sh, 9)}
 
 
+# ------------------------------------------------------- schede dei blocchi
+def _card_e2m1(p: dict, num: Numerics) -> str:
+    return "\n".join([E2M1_ELEMENT, "All 16 codes:", e2m1_table()])
+
+
+def _card_mul(p: dict, num: Numerics) -> str:
+    return "\n".join([_card_e2m1(p, num),
+                      "Every product of two E2M1 values is a multiple of 0.25 in [-36, 36]: in units "
+                      "of 1/4 it is an integer in [-144, 144] (SInt(9))."])
+
+
+def _card_packed(p: dict, num: Numerics) -> str:
+    return CONVENTION
+
+
+def _card_e8m0(p: dict, num: Numerics) -> str:
+    return E8M0_SCALE
+
+
+def _card_f2f(p: dict, num: Numerics) -> str:
+    sub = "kept (gradual underflow)" if num.out_subnormals is Subnormals.KEEP else "flushed to zero"
+    return "\n".join([
+        FP32_LAYOUT,
+        f"Output rounding: {num.out_rounding.value.upper()} (exactly one rounding of the exact value); "
+        f"results below 2^-126: subnormals {sub}; overflow -> {num.out_overflow.value}.",
+        "Canonical NaN: 0x7FC00000. An exact zero is +0 (0x00000000)."])
+
+
+def _card_fexp(p: dict, num: Numerics) -> str:
+    return FP32_LAYOUT
+
+
+def _card_qel(p: dict, num: Numerics) -> str:
+    return "\n".join([_card_e2m1(p, num),
+                      f"Rounding to E2M1: {num.quant_rounding.value.upper()}; magnitudes above 6.0 "
+                      "saturate to +/-6.0 (codes 0111 / 1111).", FP32_LAYOUT])
+
+
 # ======================================================================
 CATALOG: dict[str, Block] = {}
 
@@ -197,7 +241,8 @@ _add(Block(
     "(y = value*2, range [-12, 12]). Both zero codes give 0.",
     lambda p: [{"name": "a", "dir": "in", "type": "e2m1"},
                {"name": "y", "dir": "out", "type": "sint", "width": 5, "frac_bits": 1}],
-    Kernel(_dec, space=lambda p: ({"a": a} for a in range(16))), exhaustive=lambda p: True))
+    Kernel(_dec, space=lambda p: ({"a": a} for a in range(16))), exhaustive=lambda p: True,
+    card=_card_e2m1))
 
 _add(Block(
     "e2m1_mul", "E2M1 x E2M1 exact product",
@@ -206,7 +251,7 @@ _add(Block(
     lambda p: [{"name": "a", "dir": "in", "type": "e2m1"}, {"name": "b", "dir": "in", "type": "e2m1"},
                {"name": "p", "dir": "out", "type": "sint", "width": 9, "frac_bits": 2}],
     Kernel(_mul, space=lambda p: ({"a": a, "b": b} for a, b in product(range(16), repeat=2))),
-    exhaustive=lambda p: True))
+    exhaustive=lambda p: True, card=_card_mul))
 
 _add(Block(
     "adder_tree", "Signed adder tree",
@@ -214,7 +259,8 @@ _add(Block(
     "The output y is wide enough to never overflow: w + ceil(log2 n) bits.",
     lambda p: [{"name": "x", "dir": "in", "type": "sint", "width": p["w"], "elems": p["n"]},
                {"name": "y", "dir": "out", "type": "sint", "width": _tree_w(p)}],
-    Kernel(_tree, corner=_tree_corner, random=_tree_rand), defaults={"n": 32, "w": 9}))
+    Kernel(_tree, corner=_tree_corner, random=_tree_rand), defaults={"n": 32, "w": 9},
+    card=_card_packed))
 
 _add(Block(
     "e8m0_pair", "Combine two E8M0 scales",
@@ -225,7 +271,7 @@ _add(Block(
                {"name": "exp", "dir": "out", "type": "sint", "width": 10},
                {"name": "nan", "dir": "out", "type": "bool"}],
     Kernel(_pair, space=lambda p: ({"a": a, "b": b} for a, b in product(range(256), repeat=2))),
-    exhaustive=lambda p: True))
+    exhaustive=lambda p: True, card=_card_e8m0))
 
 _add(Block(
     "fixed_to_fp32", "Signed fixed-point x 2^exp to FP32 (RNE)",
@@ -238,7 +284,8 @@ _add(Block(
                {"name": "exp", "dir": "in", "type": "sint", "width": 10},
                {"name": "nan", "dir": "in", "type": "bool"},
                {"name": "y", "dir": "out", "type": "fp32"}],
-    Kernel(_f2f, corner=_f2f_corner, random=_f2f_rand), defaults={"w": 14, "frac": 2}))
+    Kernel(_f2f, corner=_f2f_corner, random=_f2f_rand), defaults={"w": 14, "frac": 2},
+    card=_card_f2f))
 
 _add(Block(
     "fp32_exp", "FP32 exponent extraction",
@@ -249,7 +296,7 @@ _add(Block(
                {"name": "e", "dir": "out", "type": "sint", "width": 9},
                {"name": "zero", "dir": "out", "type": "bool"},
                {"name": "special", "dir": "out", "type": "bool"}],
-    Kernel(_fexp, corner=_fexp_corner, random=_fexp_rand)))
+    Kernel(_fexp, corner=_fexp_corner, random=_fexp_rand), card=_card_fexp))
 
 _add(Block(
     "max_tree", "Masked signed maximum",
@@ -260,7 +307,7 @@ _add(Block(
                {"name": "valid", "dir": "in", "type": "uint", "width": p["n"]},
                {"name": "m", "dir": "out", "type": "sint", "width": p["w"]},
                {"name": "any", "dir": "out", "type": "bool"}],
-    Kernel(_max, random=_max_rand), defaults={"n": 32, "w": 9}))
+    Kernel(_max, random=_max_rand), defaults={"n": 32, "w": 9}, card=_card_packed))
 
 _add(Block(
     "e2m1_quant_elem", "Quantize one FP32 to E2M1 given the shared exponent",
@@ -271,7 +318,7 @@ _add(Block(
     lambda p: [{"name": "x", "dir": "in", "type": "fp32"},
                {"name": "shared", "dir": "in", "type": "sint", "width": 9},
                {"name": "q", "dir": "out", "type": "e2m1"}],
-    Kernel(_qel, random=_qel_rand)))
+    Kernel(_qel, random=_qel_rand), card=_card_qel))
 
 
 def block_task(key: str, top: str, params: dict[str, Any] | None = None,
@@ -289,6 +336,9 @@ def block_task(key: str, top: str, params: dict[str, Any] | None = None,
                     "random": 0 if b.exhaustive(p) else 3000},
     })
     t.spec_text = f"{b.title}.\n{b.doc}" + (f"\nParameters: {p}." if p else "")
+    # scheda di dominio del SOLO blocco: i fatti del task padre che servono (semantica
+    # numerica, parametri) sono già esplicitati qui, mai la scheda del padre
+    t.domain_text = b.card(p, Numerics.from_dict(numerics))
     return t
 
 

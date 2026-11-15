@@ -80,6 +80,12 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
                 "tokens_total": (m.get("llm") or {}).get("tokens"),
                 "duplicates": res.get("duplicates"),
                 "wrapper_passed": wr.get("passed") if wr else None,
+                # miglior candidato (run/best.py): complete | partial | none
+                "solution": res.get("solution") or m.get("solution"),
+                "best_tests_passed": (res.get("best") or {}).get("tests_passed"),
+                "best_tests_total": (res.get("best") or {}).get("tests_total"),
+                "llm_timeouts": res.get("llm_timeouts"), "llm_seconds": res.get("llm_seconds"),
+                "cost_usd": res.get("cost_usd"),
             })
             p = m.get("ppa") or {}
             if p:
@@ -448,7 +454,8 @@ CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "pas
               "calls_total", "time_to_pass_s", "wall_s", "model", "model_digest", "transistors",
               "depth", "transistors_pre_opt", "depth_pre_opt", "ppa_tried", "ppa_accepted", "ppa_gain",
               "fmax_min", "fmax_mhz", "adp", "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5",
-              "tokens_total", "duplicates", "wrapper_passed"]
+              "tokens_total", "duplicates", "wrapper_passed", "solution", "best_tests_passed",
+              "best_tests_total", "llm_timeouts", "llm_seconds", "cost_usd"]
 STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@3", "pass@5", "pass@10"]
 
 

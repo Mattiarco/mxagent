@@ -6,6 +6,7 @@
     mxagent golden quant  --x 1.0,-2.5,...
     mxagent verify --task benchmarks/b01_e2m1_decode [--sources X.scala]
     mxagent run    --task benchmarks/b01_e2m1_decode [--mode full|baseline-a|baseline-b]
+                   [--backend ollama|anthropic --model M --llm-timeout S]
     mxagent synth  --task benchmarks/b05_mxfp4_dot32 [--sources X.scala] | --run runs/<id>
     mxagent wrap   --task benchmarks/b08_mxfp4_mac [--sources X.scala] | --run runs/<id>
     mxagent eval   --campaign configs/eval/main.yaml [--dry-run] [--parallel N]
@@ -153,6 +154,10 @@ def cmd_run(a: argparse.Namespace) -> int:
         raise SystemExit("--model e --model-profile sono alternativi")
     if a.model:  # scorciatoia per un profilo uniforme: tutti i ruoli LLM, embed escluso
         over = {f"llm.roles.{r}.model": a.model for r in LLM_ROLES}
+    if a.backend:
+        over["llm.backend"] = a.backend
+    if a.llm_timeout:
+        over["llm.timeout_s"] = a.llm_timeout
     for kv in a.set or []:
         k, v = kv.split("=", 1)
         import yaml as _yaml
@@ -171,10 +176,12 @@ def cmd_run(a: argparse.Namespace) -> int:
                        run_id=a.run_id)
     m = res.metrics
     print(json.dumps({k: m[k] for k in ("task", "mode", "model", "seed", "passed", "stop",
-                                        "iterations", "best_stage", "best_pass_rate",
+                                        "iterations", "best_stage", "best_pass_rate", "solution",
                                         "wall_s", "llm") if k in m}, indent=1))
     if m.get("ppa"):
         print("ppa:", json.dumps(m["ppa"]))
+    from .run.best import describe as _describe_best
+    print(_describe_best(m.get("best"), res.run_dir))
     print(f"run salvata in {res.run_dir}")
     return 0 if m["passed"] else 1
 
@@ -426,6 +433,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="un solo modello per tutti i ruoli LLM (embed escluso)")
     rp.add_argument("--model-profile", default=None,
                     help="profilo di modello della config: all14b | all32b | mixed")
+    rp.add_argument("--backend", default=None, choices=["ollama", "anthropic"],
+                    help="backend LLM (default: llm.backend della config); anthropic legge "
+                         "la chiave da $ANTHROPIC_API_KEY")
+    rp.add_argument("--llm-timeout", type=float, default=None, metavar="S",
+                    help="timeout di una chiamata al modello in secondi (default: llm.timeout_s, "
+                         "oppure 300 per ollama e 120 per anthropic)")
     rp.add_argument("--config", default="configs/default.yaml")
     rp.add_argument("--seed", type=int, default=0)
     rp.add_argument("--runs-dir", default=None, help="default $MXAGENT_RUNS o runs_dir della config")

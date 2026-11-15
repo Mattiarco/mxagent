@@ -81,6 +81,15 @@ def llm_by_role(events: list[dict]) -> dict[str, dict[str, int]]:
     return {k: dict(v) for k, v in out.items()}
 
 
+def llm_result_fields(llm: Any, bud: dict) -> dict[str, Any]:
+    """Backend, timeout configurato, tempo nel modello, timeout e costo (result.json)."""
+    return {"llm_backend": getattr(llm, "backend", "scripted"),
+            "llm_timeout_s": getattr(llm, "timeout", None),
+            "llm_seconds": bud.get("llm_seconds"), "llm_timeouts": bud.get("timeouts", 0),
+            "llm_timeout_seconds": bud.get("timeout_seconds", 0.0),
+            "llm_failed_calls": bud.get("failed_calls", 0), "cost_usd": bud.get("cost_usd")}
+
+
 def ppa_attempts(ppa_out: dict | None) -> dict[str, int]:
     """Tentativi del PPA Optimizer per esito (accepted, rejected, functional_fail, ...)."""
     steps = ((ppa_out or {}).get("optimizer") or {}).get("steps") or []

@@ -22,14 +22,16 @@ from pathlib import Path
 from ..bench.subkernels import CATALOG, block_task, catalog_text
 from ..bench.task import Task
 from ..config import Config, effective_models, profile_label
-from ..llm.chat import Budget, BudgetExceeded, ChatModel, OllamaChat, parse_json
+from ..llm.chat import (Budget, BudgetExceeded, ChatModel, describe_llm, make_chat, model_digest,
+                        parse_json)
 from ..rag.embed import Embedder
 from ..rag.library import Component, Library
+from ..run import best as _best
 from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
 from ..run.result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                          ppa_attempts, write_result)
+                          llm_result_fields, ppa_attempts, write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
@@ -54,9 +56,8 @@ class Orchestrator:
         self.profile, self._profile_mismatch = profile_label(cfg, mode)
         self.models_by_role = effective_models(cfg, mode)
         self.rec = Recorder(Path(runs_dir) / (run_id or new_run_id(task.name, mode, self.profile, seed)))
-        if llm is None:
-            llm = OllamaChat(cfg.llm.host, cfg.llm.cache_dir, cfg.llm.timeout_s, cfg.llm.max_retries,
-                             budget=self.budget)
+        if llm is None:  # backend della config (ollama | anthropic): stessa interfaccia
+            llm = make_chat(cfg.llm, budget=self.budget)
         elif getattr(llm, "budget", None) is None:
             llm.budget = self.budget  # type: ignore[attr-defined]
         self.budget = getattr(llm, "budget", None) or self.budget
@@ -77,6 +78,11 @@ class Orchestrator:
         self._selected: str | None = None
         self.final_ppa: PPAReport | None = None
         self.blocks: list[dict] = []
+        #: solve del modulo top (integrazione, monolitico): candidati per best/
+        self._top_solves: list[tuple[str, SolveResult]] = []
+        self._final_rep = None  # verifica rieseguita del design finale (run superate)
+        self._best_info: dict | None = None
+        self._t_end: float | None = None  # fine del lavoro della run (prima di best/)
 
     # ------------------------------------------------------------ servizi
     def _make_verifier(self, task: Task, name: str) -> Verifier:
@@ -268,6 +274,7 @@ class Orchestrator:
         opt = (ppa_out or {}).get("optimizer") or {}
         selected = opt.get("best_tag") or best.report.tag
         rep = self._vf(self.task, "final").verify(best.sources, f"{top}_final")
+        self._final_rep = rep
         out = self.rec.root / "final"
         if out.exists():
             shutil.rmtree(out)
@@ -307,6 +314,43 @@ class Orchestrator:
             self.rec.event("final_verify_failed", stage=rep.stage, feedback=rep.feedback[:2000])
         return True
 
+    def _best_safe(self, passed: bool, synth: bool = True) -> dict:
+        """``best/``: miglior candidato (criterio in mxagent/run/best.py). Non deve mai far
+        fallire la run: un errore è registrato e il campo resta ``none``."""
+        try:
+            self._best_info = self._select_best(passed, synth)
+        except Exception as e:  # noqa: BLE001
+            self.rec.event("best_error", error=f"{type(e).__name__}: {e}")
+            self._best_info = {"solution": "none", "error": f"{type(e).__name__}: {e}"[:300]}
+        self.rec.event("best", **{k: v for k, v in self._best_info.items()
+                                  if k in ("solution", "tag", "iteration", "tests_passed",
+                                           "tests_total", "stage")})
+        return self._best_info
+
+    def _select_best(self, passed: bool, synth: bool) -> dict:
+        s = self.cfg.synth
+        final = self._final
+        if passed and final is not None and final.best is not None and self._final_rep is not None:
+            # soluzione completa: il design scelto e verificato di nuovo in final/
+            rep = self._final_rep
+            ppa = self.final_ppa.summary().get(s.primary) if self.final_ppa else None
+            c = _best.Candidate(self._selected or rep.tag, final.best.sources, rep,
+                                seq=final.best.seq, phase="final", origin=final.best.origin,
+                                synth=ppa)
+            return _best.write_best(self.rec.root, c, "complete", s.primary)
+        cands = [_best.Candidate(a.report.tag, a.sources, a.report, seq=a.seq, phase=kind,
+                                 origin=a.origin)
+                 for kind, res in self._top_solves for a in res.attempts if a.report is not None]
+
+        def synth_fn(verilog: list[str], tag: str) -> dict | None:
+            rep = self._synth(verilog, self.task, s, self.rec.root / "best_synth" / tag,
+                              backends=[s.primary])
+            return rep.summary().get(s.primary)
+
+        b = _best.select_best(cands, synth_fn if synth and s.backends else None)
+        return _best.write_best(self.rec.root, b, "complete" if b and b.report.passed else
+                                "partial", s.primary, ranking=cands)
+
     def _ppa_safe(self, final: SolveResult) -> dict | None:
         """Lo stadio PPA non deve mai far fallire una run già corretta."""
         try:
@@ -338,6 +382,9 @@ class Orchestrator:
                 self._state("FAILED", reason="exception", error=self._outcome["error"])
                 raise
             finally:
+                if self._best_info is None and self._outcome.get("status") != "interrupted":
+                    self._t_end = self._t_end or time.monotonic()
+                    self._best_safe(False, synth=False)  # run finita per eccezione
                 self._cleanup()
                 self._write_result(t0)
 
@@ -353,10 +400,11 @@ class Orchestrator:
         cfg = self.cfg
         self.rec.write_text("config.yaml", cfg.dump())
         coder = cfg.llm.roles["coder"].model
-        digest = self.llm.digest(coder) if isinstance(self.llm, OllamaChat) else "scripted"
+        digest = model_digest(self.llm, coder)
         self.rec.meta(task=self.task.name, mode=self.mode, seed=self.seed, model=coder,
                       model_profile=self.profile, models_by_role=self.models_by_role,
                       model_digest=digest, roles={k: v.model_dump() for k, v in cfg.llm.roles.items()},
+                      llm_backend=describe_llm(self.llm, cfg.llm.roles),
                       agent=cfg.agent.model_dump(), prompts=prompts.fingerprint(*PROMPTS),
                       library_size=len(self.library) if self.library else 0,
                       numerics=self.task.numerics_obj.to_dict())
@@ -378,12 +426,15 @@ class Orchestrator:
                     solved.append((b, res))
                 else:
                     final = self._final = self.integrate(plan, solved)
+                    self._top_solves.append(("integrate", final))
                     if not final.passed:
                         self._state("FALLBACK", reason="integrazione non riuscita")
                 if final is None or not final.passed:
                     final = self._final = self.monolithic()
+                    self._top_solves.append(("monolithic", final))
             else:
                 final = self._final = self.monolithic(plan)
+                self._top_solves.append(("monolithic", final))
             stop = final.stop
             if final.passed:
                 self._t_pass = time.monotonic()
@@ -417,15 +468,18 @@ class Orchestrator:
             self.rec.save_final(best.sources, best.report.verilog if best.report else [])
         b = best.report if best else None
         c = self.ctx.counters
+        self._t_end = time.monotonic()  # best/ (sintesi dei pari merito) non conta nei tempi
+        best_info = self._best_safe(passed)
         metrics = {
             "task": self.task.name, "mode": self.mode, "model": coder, "seed": self.seed,
             "passed": passed, "stop": stop if not passed else "pass",
             "iterations": c["candidates"] + c["no_code"],
             "candidates_to_pass": self._cands_at_pass, "reflect_rounds": c["reflect_rounds"],
             "time_to_pass_s": round(time_to_pass, 1) if time_to_pass else None,
-            "wall_s": round(time.monotonic() - t0, 1),
+            "wall_s": round(self._t_end - t0, 1),
             "best_stage": b.stage if b else "no_code",
             "best_pass_rate": b.sim.get("pass_rate", 0.0) if b else 0.0,
+            "solution": best_info.get("solution"), "best": best_info,
             "strategy": plan.strategy, "plan_problems": plan.problems, "blocks": self.blocks,
             "states": self.states, "escapes": sum(len(x.get("escapes", [])) for x in self.blocks)
             + (len(final.escapes) if final else 0),
@@ -462,9 +516,12 @@ class Orchestrator:
                 "candidates": c["candidates"], "no_code": c["no_code"],
                 "candidates_to_pass": self._cands_at_pass, "reflect_rounds": c["reflect_rounds"],
                 "time_to_pass_s": round(self._t_pass - t0, 1) if self._t_pass else None,
-                "wall_s": round(time.monotonic() - t0, 1),
+                "wall_s": round((self._t_end or time.monotonic()) - t0, 1),
                 "llm_calls": bud["calls"], "tokens_in": bud["prompt_tokens"],
                 "tokens_out": bud["completion_tokens"], "llm_by_role": llm_by_role(self.rec.events),
+                **llm_result_fields(self.llm, bud),
+                "solution": (self._best_info or {}).get("solution", "none"),
+                "best": self._best_info,
                 "llm_to_pass": self._llm_at_pass,
                 "duplicates": c.get("duplicates", 0),
                 "ppa": None if not out else {

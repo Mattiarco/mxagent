@@ -1,11 +1,15 @@
 # Configurazione di default di mxagent.
 # I nomi dei modelli sono solo qui: si cambiano senza toccare il codice.
 llm:
+  backend: ollama       # ollama | anthropic (--backend; la chiave cloud da $ANTHROPIC_API_KEY)
   host: null            # null = $OLLAMA_HOST o http://localhost:11434
   seed: 0
-  timeout_s: 600
+  timeout_s: null       # per chiamata (--llm-timeout); null = 300 s ollama, 120 s anthropic
   max_retries: 2
   cache_dir: .cache/llm
+  anthropic:            # solo backend anthropic (mxagent/llm/anthropic_chat.py)
+    thinking: between_tools   # niente ragionamento esteso: il più vicino ai modelli Ollama
+    effort: null              # output_config.effort; null = default del modello
   roles:
     planner:   {model: "qwen2.5-coder:32b", temperature: 0.2, num_ctx: 16384}
     coder:     {model: "qwen2.5-coder:14b", temperature: 0.4, num_ctx: 16384}

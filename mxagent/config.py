@@ -28,11 +28,41 @@ class ModelRole(_Strict):
     num_predict: int = Field(4096, ge=128)
 
 
+#: timeout di default di UNA chiamata al modello, per backend (``llm.timeout_s: null``)
+DEFAULT_TIMEOUT_S = {"ollama": 300.0, "anthropic": 120.0}
+LLM_BACKENDS = tuple(DEFAULT_TIMEOUT_S)
+
+
+class AnthropicOptions(_Strict):
+    """Opzioni del solo backend ``anthropic`` (vedi mxagent/llm/anthropic_chat.py).
+
+    Gli altri parametri (modello, ``num_predict`` -> ``max_tokens``, seed, timeout,
+    retry) sono quelli comuni dei ruoli: la pipeline non sa quale backend usa."""
+
+    #: thinking: ``between_tools`` = nessun ragionamento esteso (senza tool, il modello
+    #: risponde direttamente: il confronto più vicino a un modello Ollama non-reasoning);
+    #: ``adaptive`` = ragionamento adattivo; ``omit`` = default dell'API
+    thinking: str = "between_tools"
+    #: ``output_config.effort`` (low | medium | high | xhigh | max); None = default del modello
+    effort: str | None = None
+
+    @field_validator("thinking")
+    @classmethod
+    def _thinking(cls, v: str) -> str:
+        if v not in ("between_tools", "adaptive", "omit"):
+            raise ValueError("llm.anthropic.thinking: between_tools | adaptive | omit")
+        return v
+
+
 class LLMConfig(_Strict):
+    #: backend dei ruoli generativi: ollama (locale) | anthropic (API cloud, termine di confronto)
+    backend: str = "ollama"
     host: str | None = None  # default: $OLLAMA_HOST o http://localhost:11434
     seed: int = 0
-    timeout_s: float = 600
+    #: timeout di UNA chiamata (s); None = default del backend (DEFAULT_TIMEOUT_S)
+    timeout_s: float | None = None
     max_retries: int = 2
+    anthropic: AnthropicOptions = AnthropicOptions()
     cache_dir: str = ".cache/llm"
     roles: dict[str, ModelRole]
     #: profili di modello: nome -> {ruolo: modello}, con ``all`` per tutti i ruoli LLM
@@ -56,6 +86,17 @@ class LLMConfig(_Strict):
             if bad:
                 raise ValueError(f"profilo {name}: ruoli sconosciuti {sorted(bad)}")
         return v
+
+    @field_validator("backend")
+    @classmethod
+    def _backend(cls, v: str) -> str:
+        if v not in LLM_BACKENDS:
+            raise ValueError(f"llm.backend: {' | '.join(LLM_BACKENDS)}")
+        return v
+
+    @property
+    def effective_timeout_s(self) -> float:
+        return float(self.timeout_s) if self.timeout_s else DEFAULT_TIMEOUT_S[self.backend]
 
     def models(self) -> list[str]:
         return list(dict.fromkeys(r.model for r in self.roles.values()))

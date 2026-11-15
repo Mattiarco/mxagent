@@ -18,10 +18,21 @@ def e2m1_table() -> str:
     return "\n".join(rows)
 
 
+#: elemento FP4 E2M1 (usato dalla scheda del formato e da quelle dei blocchi del catalogo)
+E2M1_ELEMENT = ("Element FP4 E2M1 (OCP MX v1.0 §5.3.3): bit3 = sign, bits[2:1] = exponent (bias 1), "
+                "bit0 = mantissa. exponent==0 -> subnormal: value = (-1)^s * 0.5 * m; otherwise "
+                "(-1)^s * 2^(e-1) * (1 + m/2). No Inf, no NaN. Magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6. "
+                "Code 1000 is -0 and must behave as zero.")
+E8M0_SCALE = ("Shared scale E8M0: 8-bit UNSIGNED exponent, value = 2^(X-127) for X in 0..254 "
+              "(2^-127 .. 2^127); X = 0xFF is NaN; no zero, no Inf, no sign.")
+FP32_LAYOUT = ("IEEE-754 binary32: bit31 = sign, bits[30:23] = exponent (bias 127), bits[22:0] = "
+               "mantissa. Exponent field 0 -> zero or subnormal (value = m * 2^-149); exponent "
+               "field 255 -> Inf (m = 0) or NaN (m != 0); otherwise (1 + m*2^-23) * 2^(e-127).")
+
+
 def format_card(fmt: BlockFormat = MXFP4, num: Numerics = DEFAULT) -> str:
     if fmt.scale == "e8m0":
-        scale = ("Shared scale E8M0: 8-bit UNSIGNED exponent, value = 2^(X-127) for X in 0..254 "
-                 "(2^-127 .. 2^127); X = 0xFF is NaN; no zero, no Inf, no sign. "
+        scale = (E8M0_SCALE + " "
                  "If a block scale is NaN every value of the block is NaN (OCP MX v1.0 §5.1).")
     else:
         mx = fp.decode(E4M3, 0x7E).to_float()
@@ -30,10 +41,7 @@ def format_card(fmt: BlockFormat = MXFP4, num: Numerics = DEFAULT) -> str:
                  "per-tensor scale.")
     return "\n".join([
         f"FORMAT {fmt.name.upper()}: blocks of k={fmt.k} elements, each FP4 E2M1, sharing one scale.",
-        "Element FP4 E2M1 (OCP MX v1.0 §5.3.3): bit3 = sign, bits[2:1] = exponent (bias 1), "
-        "bit0 = mantissa. exponent==0 -> subnormal: value = (-1)^s * 0.5 * m; otherwise "
-        "(-1)^s * 2^(e-1) * (1 + m/2). No Inf, no NaN. Magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6. "
-        "Code 1000 is -0 and must behave as zero.",
+        E2M1_ELEMENT,
         "All 16 codes:", e2m1_table(),
         "Every E2M1 value is a multiple of 0.5 in [-6, 6]: in units of 1/2 it is an integer in "
         "[-12, 12] (SInt(5)). Every product of two E2M1 values is a multiple of 0.25 in [-36, 36]: "
