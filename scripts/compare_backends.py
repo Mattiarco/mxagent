@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -90,8 +91,21 @@ def command(a, j: dict, out: Path) -> list[str]:
 
 
 def execute(a, out: Path) -> None:
-    out.mkdir(parents=True, exist_ok=True)
     js = jobs(a)
+    todo = [j for j in js if not _finished(out / "runs" / j["id"])]
+    print(f"{len(js)} run nel confronto, {len(todo)} da eseguire", flush=True)
+    if a.dry_run:  # niente da scrivere né da sintetizzare: solo l'elenco dei comandi
+        try:
+            if not a.no_reference:
+                miss = [t for t in a.tasks.split(",")
+                        if not (out / "reference" / t / "ppa.json").is_file()]
+                print(f"reference da sintetizzare: {', '.join(miss) or 'nessuno'}")
+            for j in todo:
+                print(" ".join(command(a, j, out)))
+        except BrokenPipeError:  # es. | head: l'uscita è stata chiusa, nessun errore
+            sys.stdout = open(os.devnull, "w")
+        return
+    out.mkdir(parents=True, exist_ok=True)
     (out / "compare.json").write_text(json.dumps({
         "configs": a.configs, "tasks": a.tasks, "modes": a.modes, "n": a.n,
         "seed_start": a.seed_start, "config": a.config, "set": a.set,
@@ -106,15 +120,10 @@ def execute(a, out: Path) -> None:
                     "--tag", "compare_ref"], cwd=ROOT, timeout=a.job_timeout)
             print(f"reference {task}: {'ok' if (ref / 'ppa.json').is_file() else 'ERRORE'}"
                   + ("" if (ref / "ppa.json").is_file() else f" ({(r.stderr or r.stdout)[-200:]})"))
-    todo = [j for j in js if not _finished(out / "runs" / j["id"])]
-    print(f"{len(js)} run nel confronto, {len(todo)} da eseguire")
     logs = out / "logs"
     logs.mkdir(exist_ok=True)
     for i, j in enumerate(todo, 1):
         cmd = command(a, j, out)
-        if a.dry_run:
-            print(" ".join(cmd))
-            continue
         r = sh(cmd, cwd=ROOT, timeout=a.job_timeout, grace=120)
         (logs / f"{j['id']}.log").write_text(r.stdout + "\n" + r.stderr, encoding="utf-8")
         res = _read(out / "runs" / j["id"] / "result.json") or {}
