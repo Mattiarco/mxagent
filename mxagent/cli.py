@@ -1,6 +1,6 @@
 """CLI headless di mxagent.
 
-    mxagent doctor [--warmup] [--synth] [--config configs/default.yaml]
+    mxagent doctor [--warmup] [--synth] [--resources [--kill-orphans]] [--config configs/default.yaml]
     mxagent golden card   [--format mxfp4|nvfp4]
     mxagent golden dot    --a-scale 127 --a 2,2,... --b-scale 127 --b 2,2,...
     mxagent golden quant  --x 1.0,-2.5,...
@@ -9,11 +9,14 @@
                    [--backend ollama|anthropic --model M --llm-timeout S]
     mxagent synth  --task benchmarks/b05_mxfp4_dot32 [--sources X.scala] | --run runs/<id>
     mxagent wrap   --task benchmarks/b08_mxfp4_mac [--sources X.scala] | --run runs/<id>
-    mxagent eval   --campaign configs/eval/main.yaml [--dry-run] [--parallel N]
+    mxagent eval   --campaign configs/eval/main.yaml [--dry-run]
     mxagent eval   --tasks b04_mxfp4_quantize,b05_mxfp4_dot32 --configs full,baseline_a,baseline_b \
                    --model-profiles all14b,all32b --seeds 0 --campaign-budget-s 21600 \
                    --out runs/eval_<data> [--dry-run]
     mxagent report runs/eval_<data>   (oppure --dir)
+
+Le run sono sempre una alla volta (una GPU e un Ollama): le campagne eseguono i job in
+sequenza e non esiste ``--parallel``.
 """
 from __future__ import annotations
 
@@ -22,6 +25,21 @@ import struct
 import sys
 
 from . import __version__
+
+NO_PARALLEL = ("--parallel non esiste più: le run sono sempre sequenziali (un job alla volta; "
+               "una GPU e un Ollama)")
+
+
+class _NoParallel(argparse.Action):
+    """``--parallel`` tolto: fallisce con un messaggio chiaro invece di "unrecognized"."""
+
+    def __init__(self, option_strings, dest, **kw):
+        kw.pop("nargs", None)
+        super().__init__(option_strings, dest, nargs="?", help=argparse.SUPPRESS, **kw)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(NO_PARALLEL)
+
 
 def _ints(s: str) -> list[int]:
     return [int(x, 0) for x in s.replace(" ", "").split(",") if x]
@@ -67,8 +85,8 @@ def cmd_doctor(a: argparse.Namespace) -> int:
               f"sim.jvm_cpus = {cfg.sim.jvm_cpus})\n")
         print(procs.render_snapshot(snap))
         errors, warns, est = procs.preflight(snap, jvm_cpus=cfg.sim.jvm_cpus)
-        print(f"\nstima per parallel={a.parallel}: {a.parallel} x {est['per_job_tasks']} task per "
-              f"job + {est['reserved_tasks']} riservati = {est['need_tasks']}")
+        print(f"\nstima per un job (le run sono sempre una alla volta): {est['per_job_tasks']} "
+              f"task di picco + {est['reserved_tasks']} riservati = {est['need_tasks']}")
         for w in warns:
             print(f"AVVISO: {w}")
         for e in errors:
@@ -357,9 +375,9 @@ def flag_campaign(a: argparse.Namespace, name: str):
         "llm_cache": a.llm_cache or "shared"})
 
 
-def describe_campaign(c, r, todo: list, parallel: int = 1) -> str:
-    """Testo del dry-run: job in ordine, budget, parallel, stima del tempo (limite
-    superiore) e dei processi/thread di picco."""
+def describe_campaign(c, r, todo: list) -> str:
+    """Testo del dry-run: job in ordine, budget, stima del tempo (limite superiore) e dei
+    processi/thread di picco di un job (i job sono sempre uno alla volta)."""
     from .eval.campaign import jobs
     from .util import procs
 
@@ -385,10 +403,10 @@ def describe_campaign(c, r, todo: list, parallel: int = 1) -> str:
     snap = procs.snapshot()
     _, _, est = procs.preflight(snap, jvm_cpus=cfg.sim.jvm_cpus)
     lim = est["pids_limit"]
-    L += [f"parallel: {parallel} job insieme",
+    L += ["esecuzione: sequenziale (1 job alla volta)",
           f"JVM di sbt: sim.sbt_mode={cfg.sim.sbt_mode}, -XX:ActiveProcessorCount="
           f"{cfg.sim.jvm_cpus or 'nessun limite'} (sim.jvm_cpus)",
-          f"picco stimato di processi+thread: {parallel} x {est['per_job_tasks']} per job "
+          f"picco stimato di processi+thread: {est['per_job_tasks']} per il job in corso "
           f"(JVM sbt server+client, firtool, Verilator/g++ con {est['ncpu']} cpu) + "
           f"{est['reserved_tasks']} riservati (Ollama, tmux, sintesi) = {est['need_tasks']}; "
           + (f"limite attuale {lim}, in uso {est['pids_used']}" if lim is not None
@@ -433,7 +451,7 @@ def cmd_eval(a: argparse.Namespace) -> int:
         c = flag_campaign(a, out.name)
     r = Runner(c, out)
     if a.dry_run:
-        print(describe_campaign(c, r, r.pending(a.retry_errors), a.parallel))
+        print(describe_campaign(c, r, r.pending(a.retry_errors)))
         return 0
     from .util import procs
     errors, warns, est = procs.preflight(jvm_cpus=r.base_config().sim.jvm_cpus)
@@ -489,8 +507,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--skip-llm", action="store_true", help="non controllare Ollama (solo toolchain HW)")
     d.add_argument("--synth", action="store_true", help="elenca i backend di sintesi disponibili/mancanti")
     d.add_argument("--resources", action="store_true",
-                   help="limiti di processi/thread, cgroup, memoria, JVM vive e orfane; stima per --parallel")
-    d.add_argument("--parallel", type=int, default=1, help="con --resources: job in parallelo previsti")
+                   help="limiti di processi/thread, cgroup, memoria, JVM vive e orfane; stima "
+                        "per un job")
+    d.add_argument("--parallel", action=_NoParallel)
     d.add_argument("--kill-orphans", action="store_true",
                    help="con --resources: termina le JVM di sbt orfane (SIGTERM, poi SIGKILL)")
     d.set_defaults(func=cmd_doctor)
@@ -599,13 +618,13 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--llm-cache", default=None, choices=["shared", "campaign", "off"],
                     help="cache delle risposte LLM dei job: shared (config, default), campaign "
                          "(<campagna>/llm_cache, non condivisa con altre campagne) o off")
-    ep.add_argument("--parallel", type=int, default=1, help="job in parallelo (Ollama serializza su GPU)")
+    ep.add_argument("--parallel", action=_NoParallel)
     ep.add_argument("--retry-errors", action="store_true", help="rifà i job finiti in errore/timeout")
     ep.add_argument("--limit", type=int, default=None, help="esegue al più N job (prove)")
     ep.add_argument("--dry-run", action="store_true", help="elenca i job senza eseguirli")
     ep.add_argument("--force", action="store_true",
-                    help="parte anche se il controllo delle risorse fallisce (ulimit/pids.max bassi "
-                         "per --parallel, JVM orfane)")
+                    help="parte anche se il controllo delle risorse fallisce (ulimit/pids.max "
+                         "bassi anche per un job, JVM orfane)")
     ep.set_defaults(func=cmd_eval)
 
     pp = sub.add_parser("report", help="report di una campagna (anche incompleta)")

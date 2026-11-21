@@ -318,9 +318,24 @@ def test_orphans_are_judged_by_working_dir_not_parent(tmp_path, monkeypatch):
     assert [p.pid for p in procs.orphan_jvms([live, jvm_live, jvm_dead])] == [12]
 
 
-def test_dry_run_shows_parallel_and_peak(capsys):
+def test_dry_run_shows_sequential_execution_and_peak_of_one_job(capsys):
     from mxagent import cli
     assert cli.main(["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run",
-                     "--parallel", "3", "--out", str(ROOT / ".pytest_cache" / "dry_main")]) == 0
+                     "--out", str(ROOT / ".pytest_cache" / "dry_main")]) == 0
     out = capsys.readouterr().out
-    assert "parallel: 3 job insieme" in out and "picco stimato di processi+thread: 3 x" in out
+    assert "esecuzione: sequenziale (1 job alla volta)" in out
+    assert "picco stimato di processi+thread: " in out and "per il job in corso" in out
+    assert "parallel" not in out
+
+
+@pytest.mark.parametrize("argv", [
+    ["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--parallel", "2"],
+    ["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run", "--parallel=2"],
+    ["doctor", "--resources", "--parallel", "2"],
+])
+def test_parallel_option_fails_with_a_clear_message(argv, capsys):
+    from mxagent import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)
+    assert e.value.code == 2
+    assert "le run sono sempre sequenziali" in capsys.readouterr().err
