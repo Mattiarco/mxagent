@@ -347,6 +347,6 @@ def test_main_campaign_uses_campaign_cache(tmp_path, capsys):
         assert all(dict(j.overrides)["llm.cache_dir"].endswith("/llm_cache") for j in jobs(c, tmp_path))
     from mxagent import cli
     assert cli.main(["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run",
-                     "--parallel", "2", "--out", str(tmp_path / "main")]) == 0
+                     "--out", str(tmp_path / "main")]) == 0
     out = capsys.readouterr().out
-    assert "cache LLM: della campagna" in out and "parallel: 2 job insieme" in out
+    assert "cache LLM: della campagna" in out and "esecuzione: sequenziale" in out

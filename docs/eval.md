@@ -120,8 +120,7 @@ La campagna principale ha 910 job:
   da `trace.json` con la stessa funzione (`calls_to_pass_src` in `runs.csv`).
 - **Niente leakage:** con la politica `fresh`, la default, ogni run del sistema
   completo parte da una libreria vuota tutta sua. Il riuso avviene solo dentro la
-  run, quindi i risultati non dipendono dall'ordine dei task né dal
-  parallelismo. Con `frozen` si usa una libreria costruita prima, in sola
+  run, quindi i risultati non dipendono dall'ordine dei task. Con `frozen` si usa una libreria costruita prima, in sola
   lettura; i componenti del task in esame sono comunque esclusi.
 - **Riproducibilità e cache:**
   - il seed è passato a Ollama;
@@ -251,24 +250,34 @@ La campagna principale ha 910 job:
   shutdown` parte solo se il server esiste (altrimenti il client ne avvierebbe uno
   per spegnerlo); un `active.json` rimasto da un server morto viene tolto.
 - **Controllo delle risorse:** `mxagent eval` controlla prima di partire il limite
-  sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto a parallel x
-  picco stimato per job (2·c+60 thread del server sbt e c+30 del client, con c =
+  sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto al picco
+  stimato di un job (2·c+60 thread del server sbt e c+30 del client, con c =
   `sim.jvm_cpus`; firtool; cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux,
   sintesi), e la presenza di JVM di sbt orfane; se non basta si ferma con il motivo
   (`--force` per partire comunque). Diagnosi: `scripts/check_resources.sh` (limiti,
   thread per comando, ruolo, thread, CPU viste e mappe di ogni JVM, overcommit e
   `vm.max_map_count`, perché `pthread_create` dà EAGAIN anche quando non riesce a
-  mappare lo stack) oppure `mxagent doctor --resources --parallel N
-  [--kill-orphans]`. Il dry-run mostra parallel, `sim.jvm_cpus` e la stima. Misura
-  durante una prova: `scripts/watch_resources.sh OUT.tsv 5 PID...` (task
+  mappare lo stack, e chi tiene il lock delle run) oppure `mxagent doctor
+  --resources [--kill-orphans]`. Il dry-run mostra l'esecuzione sequenziale,
+  `sim.jvm_cpus` e la stima. Prova di una run con la diagnosi prima, durante e dopo:
+  `bash scripts/trial.sh [TASK] [PROFILO] [SEED] [MODALITÀ]` (cache LLM off,
+  `summary.txt`). Misura durante una prova: `scripts/watch_resources.sh OUT.tsv 5 PID...` (task
   dell'utente, JVM con ruolo e thread, firtool, Verilator, g++, Yosys, Ollama,
   memoria ogni 5 s).
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.
-- **Parallelismo:** `--parallel N` esegue N job insieme. Ogni job ha il suo
-  workspace sbt. Ollama serializza le richieste sulla stessa GPU, quindi il
-  guadagno sta soprattutto nella sovrapposizione fra LLM e verifica/sintesi.
+- **Una run alla volta:** i job di una campagna girano in sequenza, nell'ordine del
+  dry-run; non esiste `--parallel` (se passato, il comando fallisce). Con una GPU e
+  un Ollama due run insieme si contendono il modello, il tempo di ognuna dipende
+  dall'altra (il budget è in tempo di parete) e i thread delle JVM di sbt si
+  sommano. `mxagent eval` (non `--dry-run`), `mxagent run` e `mxagent verify`
+  prendono un lock esclusivo (`flock`) su `~/.cache/mxagent/run.lock` (o
+  `MXAGENT_LOCK_FILE`): se un'altra run è in corso escono con il suo pid, il
+  comando e l'ora di avvio. Il lock lo rilascia il kernel quando il processo
+  muore, anche per SIGKILL, quindi non restano lock orfani. I job della campagna
+  ereditano `MXAGENT_LOCK_HELD=<pid del runner>` e non si bloccano sul lock del
+  runner.
 
 ## Report
 

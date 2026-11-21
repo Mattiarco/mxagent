@@ -21,7 +21,7 @@ object Elaborate {
   // niente -strip-debug-info: i locatori `// @[File.scala l:c]` nel Verilog
   // permettono di riportare i warning di lint al sorgente Scala
   // --mlir-disable-threading: niente thread pool di MLIR (un thread per core).
-  // Con limiti su processi/thread (ulimit -u, cgroup pids) e job in parallelo,
+  // Con limiti su processi/thread (ulimit -u, cgroup pids) già quasi esauriti,
   // la creazione dei thread fallisce con EAGAIN e firtool abortisce (exit 134)
   // dopo aver già scritto il Verilog. I moduli sono piccoli: il costo è nullo.
   val firtoolOpts = Array("-disable-all-randomization", "--mlir-disable-threading")

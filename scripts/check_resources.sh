@@ -5,8 +5,8 @@
 #
 #   bash scripts/check_resources.sh            # solo lettura, non termina nulla
 #
-# Nessuna dipendenza oltre a coreutils/procps. La stessa diagnosi, con la stima per
-# --parallel, è `mxagent doctor --resources --parallel N`.
+# Nessuna dipendenza oltre a coreutils/procps. La stessa diagnosi, con la stima per un
+# job (le run sono sempre una alla volta), è `mxagent doctor --resources`.
 set -u
 me=$(id -un)
 uid=$(id -u)
@@ -109,3 +109,16 @@ if command -v sbt >/dev/null 2>&1; then
 fi
 echo "JAVA_TOOL_OPTIONS=${JAVA_TOOL_OPTIONS:-'(non impostata)'}"
 echo "sim.sbt_mode in configs/default.yaml: $(grep -E '^\s*sbt_mode:' configs/default.yaml 2>/dev/null | awk '{print $2}')"
+
+hr "lock delle run (una alla volta)"
+lock=${MXAGENT_LOCK_FILE:-$HOME/.cache/mxagent/run.lock}
+if [ ! -f "$lock" ]; then
+  echo "  $lock: mai preso (nessuna run avviata con questo utente)"
+elif command -v flock >/dev/null 2>&1 && flock -n "$lock" true 2>/dev/null; then
+  echo "  $lock: libero"
+else
+  echo "  $lock: PRESO da $(tr '\n' ' ' < "$lock")"
+fi
+mx=$(pgrep -u "$uid" -af 'mxagent (run|eval|verify)' 2>/dev/null | grep -v pgrep || true)
+echo "  processi mxagent run/eval/verify: $(printf '%s\n' "$mx" | grep -c . || true)"
+[ -n "$mx" ] && printf '%s\n' "$mx" | cut -c1-200 | sed 's/^/    /'

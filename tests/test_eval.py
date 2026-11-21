@@ -1,6 +1,7 @@
 """Valutazione (M6): statistiche, espansione dei job, runner con esecutore
 finto (nessun LLM né toolchain), report su risultati sintetici noti."""
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -377,3 +378,33 @@ def test_single_seed_summary_report(tmp_path):
     assert "budget di campagna esaurito" in notes and "signal SIGTERM" in notes
     pytest.importorskip("matplotlib")
     assert (out / "pass_rate.png").stat().st_size > 1000 and "pass_rate.png" in md
+
+
+def test_runner_runs_jobs_one_at_a_time_in_order(tmp_path):
+    """Un job alla volta: nessuna sovrapposizione fra inizio e fine, ordine di jobs()."""
+    import inspect
+    import threading
+    from mxagent.eval.campaign import jobs
+    c = camp()
+    inner, spans, active = FakeExec(), [], []
+    lock = threading.Lock()
+
+    def ex(cmd, cwd, timeout):
+        if cmd[3] != "run":
+            return inner(cmd, cwd, timeout)
+        rid = cmd[cmd.index("--run-id") + 1]
+        with lock:
+            active.append(rid)
+            assert len(active) == 1, f"job sovrapposti: {active}"
+        t0 = time.monotonic()
+        time.sleep(0.01)
+        r = inner(cmd, cwd, timeout)
+        with lock:
+            active.remove(rid)
+        spans.append((rid, t0, time.monotonic()))
+        return r
+    r = Runner(c, tmp_path, repo=ROOT, executor=ex, python="py")
+    r.run(log=lambda s: None)
+    assert [s[0] for s in spans] == [j.id for j in jobs(c, tmp_path)]
+    assert all(a[2] <= b[1] for a, b in zip(spans, spans[1:]))
+    assert "parallel" not in inspect.signature(Runner.run).parameters

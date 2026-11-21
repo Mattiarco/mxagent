@@ -1,58 +1,52 @@
 #!/usr/bin/env bash
-# Prova di N run in parallelo come in campagna, con la diagnosi delle risorse prima,
-# durante e dopo, e un riepilogo unico da incollare.
+# Prova di UNA run (le run sono sempre una alla volta: una GPU e un Ollama), con la
+# diagnosi delle risorse prima, durante e dopo, e un riepilogo unico da incollare.
 #
-#   bash scripts/trial_parallel.sh [N] [TASK] [PROFILO] [PRIMO_SEED]
-#   (default: 2 benchmarks/b05_mxfp4_dot32 all14b 2  ->  seed 2 e 3, modalità full)
+#   bash scripts/trial.sh [TASK] [PROFILO] [SEED] [MODALITÀ]
+#   (default: benchmarks/b05_mxfp4_dot32 all14b 2 full)
 #
 # Cache LLM disattivata (--llm-cache off): ogni chiamata va al modello. Uscita in
-# $OUT (default runs/trial_p<N>_<data>): check_before.txt, check_during_<k>.txt,
-# check_after.txt, watch.tsv (campioni ogni 5 s), s<seed>/ (le run), s<seed>.log,
-# summary.txt (stampato anche a schermo). Durata: fino a ~45 min (budget 1800 s per run
-# più la scelta di best/).
+# $OUT (default runs/trial_<data>): check_before.txt, check_during_<k>.txt,
+# check_after.txt, watch.tsv (campioni ogni 5 s), s<seed>/ (la run), s<seed>.log,
+# summary.txt (stampato anche a schermo). Durata: fino a ~45 min (budget 1800 s più la
+# scelta di best/). Se un'altra run o una campagna è in corso, la run esce subito
+# (lock di mxagent.util.runlock) e il riepilogo lo dice.
 set -u
-N=${1:-2}
-TASK=${2:-benchmarks/b05_mxfp4_dot32}
-PROF=${3:-all14b}
-S0=${4:-2}
-OUT=${OUT:-runs/trial_p${N}_$(date +%Y%m%d_%H%M%S)}
+TASK=${1:-benchmarks/b05_mxfp4_dot32}
+PROF=${2:-all14b}
+SEED=${3:-2}
+MODE=${4:-full}
+OUT=${OUT:-runs/trial_$(date +%Y%m%d_%H%M%S)}
 PY=${PYTHON:-python}
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"
 
-echo "prova: $N run in parallelo, $TASK, full, $PROF, seed $S0..$((S0 + N - 1)), cache LLM off -> $OUT"
+echo "prova: 1 run, $TASK, $MODE, $PROF, seed $SEED, cache LLM off -> $OUT"
 bash "$here/check_resources.sh" > "$OUT/check_before.txt" 2>&1
 
-pids=()
-for i in $(seq 0 $((N - 1))); do
-  s=$((S0 + i))
-  mxagent run --task "$TASK" --mode full --model-profile "$PROF" --seed "$s" --llm-cache off \
-    --runs-dir "$OUT" --run-id "s$s" > "$OUT/s$s.log" 2>&1 &
-  pids+=($!)
-done
-echo "run avviate: pid ${pids[*]}"
+mxagent run --task "$TASK" --mode "$MODE" --model-profile "$PROF" --seed "$SEED" --llm-cache off \
+  --runs-dir "$OUT" --run-id "s$SEED" > "$OUT/s$SEED.log" 2>&1 &
+rpid=$!
+echo "run avviata: pid $rpid (log $OUT/s$SEED.log)"
 
-any_alive() { for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
-
-bash "$here/watch_resources.sh" "$OUT/watch.tsv" 5 "${pids[@]}" &
+bash "$here/watch_resources.sh" "$OUT/watch.tsv" 5 "$rpid" &
 wpid=$!
-# "durante": a 3 minuti (server sbt avviati, verifiche in corso), poi ogni 10 minuti
+# "durante": a 3 minuti (server sbt avviato, verifiche in corso), poi ogni 10 minuti
 (
   sleep 180; k=1
-  while any_alive; do
+  while kill -0 "$rpid" 2>/dev/null; do
     bash "$here/check_resources.sh" > "$OUT/check_during_$k.txt" 2>&1
     k=$((k + 1)); sleep 600
   done
 ) &
 dpid=$!
 
-codes=()
-for p in "${pids[@]}"; do wait "$p"; codes+=($?); done
+wait "$rpid"; code=$?
 wait "$wpid" 2>/dev/null
 kill "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
 sleep 5  # le JVM terminate a fine run hanno il tempo di uscire
 bash "$here/check_resources.sh" > "$OUT/check_after.txt" 2>&1
-echo "codici di uscita: ${codes[*]}" > "$OUT/exit_codes.txt"
+echo "codice di uscita: $code" > "$OUT/exit_codes.txt"
 pgrep -u "$(id -u)" -a java > "$OUT/java_after.txt" 2>/dev/null || true
 
 "$PY" - "$OUT" <<'PYEOF' | tee "$OUT/summary.txt"
@@ -64,7 +58,16 @@ out = Path(sys.argv[1])
 print(f"== riepilogo {out}")
 print((out / "exit_codes.txt").read_text().strip())
 ready = True
-for rd in sorted(p for p in out.iterdir() if p.is_dir() and p.name.startswith("s")):
+for log in sorted(out.glob("s*.log")):
+    text = log.read_text(errors="replace")
+    if "un'altra run è in corso" in text:
+        ready = False
+        print("RUN NON AVVIATA: " + text.strip()[-400:])
+runs = sorted(p for p in out.iterdir() if p.is_dir() and p.name.startswith("s"))
+if not runs:
+    ready = False
+    print("nessuna cartella di run in", out)
+for rd in runs:
     print(f"\n-- run {rd.name}")
     tr = rd / "trace.json"
     ev = json.loads(tr.read_text()) if tr.is_file() else []
@@ -128,7 +131,7 @@ if w.is_file():
     print("  thread massimi per JVM, per ruolo:", dict(per_role) or "nessuna JVM vista")
 java_after = (out / "java_after.txt").read_text().strip()
 print("\nJVM rimaste alla fine:", java_after or "nessuna")
-print("\ncriterio 'pronta' (nessun errore di sistema non recuperato, tutte con result.json):",
+print("\ncriterio 'pronta' (nessun errore di sistema non recuperato, result.json presente):",
       "SÌ" if ready else "NO")
 PYEOF
 

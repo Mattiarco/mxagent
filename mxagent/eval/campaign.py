@@ -8,7 +8,7 @@ Politica della libreria (anti-leakage, indipendenza dall'ordine):
 
 ``fresh``   ogni run parte da una libreria vuota tutta sua (default): il riuso
             avviene solo dentro la run, i risultati non dipendono dall'ordine
-            dei task né dai job paralleli.
+            dei task.
 ``frozen``  libreria costruita prima (``library.path``) e in sola lettura; i
             componenti del task in esame sono comunque esclusi.
 

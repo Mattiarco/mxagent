@@ -287,15 +287,24 @@ def _snap(**kw):
 
 def test_preflight_thresholds(monkeypatch):
     monkeypatch.setattr(procs, "supported", lambda: True)  # come su Linux
-    err, warn, est = procs.preflight(2, _snap())
-    assert err == [] and est["need_tasks"] == 2 * procs.job_peak_threads(20) + procs.RESERVED_TASKS
-    err, _, _ = procs.preflight(4, _snap(cgroups=[{"path": "/u", "max": "1200", "current": "300"}]))
-    assert err and "parallel=4" in err[0] and "unable to create native thread" in err[0]
+    err, warn, est = procs.preflight(_snap())
+    assert err == [] and est["need_tasks"] == procs.job_peak_threads(20) + procs.RESERVED_TASKS
+    assert "parallel" not in est
+    # TasksMax troppo basso anche per un solo job: 900 task liberi < 1 job + quota riservata
+    err, _, est = procs.preflight(_snap(cgroups=[{"path": "/u", "max": "1200", "current": "300"}]))
+    assert est["need_tasks"] > 900
+    assert err and "per un job ne servono" in err[0] and "unable to create native thread" in err[0]
+    assert "TasksMax" in err[0] and "--parallel" not in err[0]
+    # con il limite che basta per un job: nessun errore
+    err, _, _ = procs.preflight(_snap(cgroups=[{"path": "/u", "max": "4000", "current": "300"}]))
+    assert err == []
     orphan = procs.Proc(4242, 1, 1000, 120, "java", "java -jar sbt-launch.jar", "/x/runs/r/sbt")
-    err, _, _ = procs.preflight(1, _snap(orphans=[orphan]))
+    err, _, _ = procs.preflight(_snap(orphans=[orphan]))
     assert err and "orfane" in err[0] and "4242" in err[0]
-    _, warn, _ = procs.preflight(1, _snap(nofile_soft=1024))
+    _, warn, _ = procs.preflight(_snap(nofile_soft=1024))
     assert any("ulimit -n" in w for w in warn)
+    _, warn, _ = procs.preflight(_snap(mem_available=2 * 2**30))
+    assert any("per un job" in w for w in warn)
 
 
 def test_orphans_are_judged_by_working_dir_not_parent(tmp_path, monkeypatch):
@@ -309,9 +318,24 @@ def test_orphans_are_judged_by_working_dir_not_parent(tmp_path, monkeypatch):
     assert [p.pid for p in procs.orphan_jvms([live, jvm_live, jvm_dead])] == [12]
 
 
-def test_dry_run_shows_parallel_and_peak(capsys):
+def test_dry_run_shows_sequential_execution_and_peak_of_one_job(capsys):
     from mxagent import cli
     assert cli.main(["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run",
-                     "--parallel", "3", "--out", str(ROOT / ".pytest_cache" / "dry_main")]) == 0
+                     "--out", str(ROOT / ".pytest_cache" / "dry_main")]) == 0
     out = capsys.readouterr().out
-    assert "parallel: 3 job insieme" in out and "picco stimato di processi+thread: 3 x" in out
+    assert "esecuzione: sequenziale (1 job alla volta)" in out
+    assert "picco stimato di processi+thread: " in out and "per il job in corso" in out
+    assert "parallel" not in out
+
+
+@pytest.mark.parametrize("argv", [
+    ["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--parallel", "2"],
+    ["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run", "--parallel=2"],
+    ["doctor", "--resources", "--parallel", "2"],
+])
+def test_parallel_option_fails_with_a_clear_message(argv, capsys):
+    from mxagent import cli
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)
+    assert e.value.code == 2
+    assert "le run sono sempre sequenziali" in capsys.readouterr().err

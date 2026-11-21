@@ -1,5 +1,7 @@
 """Esecuzione di una campagna: un sottoprocesso ``mxagent run`` per job.
 
+* sequenza: un job alla volta (una GPU e un Ollama: job insieme si contendono il
+  modello, il tempo di una run dipende dall'altra e i thread delle JVM si sommano);
 * isolamento: un crash o un timeout di un job non ferma la campagna;
 * ripresa: ``index.jsonl`` (append-only) registra l'esito di ogni job; una
   campagna rilanciata salta i job già completati (``--retry-errors`` rifà
@@ -7,7 +9,7 @@
 * sintesi: ogni design passato (di qualunque modalità) viene sintetizzato con
   ``ppa_backends`` per confrontare la qualità dei risultati; il riferimento di
   ogni task è sintetizzato una volta in ``reference/<task>/``;
-* budget di campagna (``campaign_budget_s``, solo in sequenza): oltre, i job rimanenti
+* budget di campagna (``campaign_budget_s``): oltre, i job rimanenti
   sono registrati come ``skipped_budget`` senza eseguirli (una ripresa li rifà);
 * warm-up (``warmup``): prima del primo job di ogni insieme di modelli i modelli
   vengono caricati in Ollama; il tempo del warm-up non conta nel budget;
@@ -25,7 +27,6 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -241,8 +242,9 @@ class Runner:
             todo.append(j)
         return todo
 
-    def run(self, *, parallel: int = 1, retry_errors: bool = False, limit: int | None = None,
+    def run(self, *, retry_errors: bool = False, limit: int | None = None,
             log: Callable[[str], None] = print) -> list[dict]:
+        """Esegue i job da fare uno alla volta, nell'ordine di :func:`jobs`."""
         self.out.mkdir(parents=True, exist_ok=True)
         (self.out / "campaign.json").write_text(json.dumps(
             {"campaign": self.c.model_dump(mode="json"), "digest": self.c.digest(),
@@ -252,38 +254,26 @@ class Runner:
             log(f"sintesi dei riferimenti: {self.synth_references()}")
         todo = self.pending(retry_errors)[:limit]
         total = len(jobs(self.c, self.out))
-        log(f"{len(todo)} job da eseguire ({total} nella campagna, {parallel} in parallelo)")
+        log(f"{len(todo)} job da eseguire ({total} nella campagna, uno alla volta)")
         done: list[dict] = []
-
-        def one(j: Job) -> dict:
-            e = self.run_job(j)
-            with self._lock:
-                done.append(e)
-                log(f"[{len(done)}/{len(todo)}] {j.id}: {e['status']} ({e['seconds']} s)")
-            return e
-
         budget = self.c.campaign_budget_s
-        if parallel <= 1:
-            spent = 0.0  # tempo dei job, warm-up escluso
-            warmed: set[str] = set()
-            for j in todo:
-                if budget is not None and spent >= budget:
-                    e = self.skip_entry(j, spent)
-                    self._append(e)
-                    done.append(e)
-                    log(f"[{len(done)}/{len(todo)}] {j.id}: skipped_budget")
-                    continue
-                if self.c.warmup and j.models not in warmed:
-                    warmed.add(j.models)
-                    self.warm(j, log)
-                t0 = self.clock()
-                one(j)
-                spent += self.clock() - t0
-            if budget is not None:
-                log(f"tempo dei job: {spent:.0f} s su un budget di {budget} s")
-        else:
-            if budget is not None or self.c.warmup:
-                raise ValueError("campaign_budget_s e warmup richiedono l'esecuzione in sequenza")
-            with ThreadPoolExecutor(parallel) as ex:
-                list(ex.map(one, todo))
+        spent = 0.0  # tempo dei job, warm-up escluso
+        warmed: set[str] = set()
+        for j in todo:
+            if budget is not None and spent >= budget:
+                e = self.skip_entry(j, spent)
+                self._append(e)
+                done.append(e)
+                log(f"[{len(done)}/{len(todo)}] {j.id}: skipped_budget")
+                continue
+            if self.c.warmup and j.models not in warmed:
+                warmed.add(j.models)
+                self.warm(j, log)
+            t0 = self.clock()
+            e = self.run_job(j)
+            spent += self.clock() - t0
+            done.append(e)
+            log(f"[{len(done)}/{len(todo)}] {j.id}: {e['status']} ({e['seconds']} s)")
+        if budget is not None:
+            log(f"tempo dei job: {spent:.0f} s su un budget di {budget} s")
         return done
