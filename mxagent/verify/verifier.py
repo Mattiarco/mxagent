@@ -21,6 +21,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from ..bench.kernels import get_kernel
 from ..bench.task import Task
@@ -91,6 +92,9 @@ class Verifier:
         self.max_vectors = max_vectors
         #: attese prima di ogni nuovo tentativo dopo un errore di sistema (len = tentativi in più)
         self.infra_backoff = tuple(infra_backoff)
+        #: chiamata a ogni nuovo tentativo dopo un errore di sistema (evento ``infra_retry``
+        #: nel trace della run); riceve lo stesso dict aggiunto a ``infra_retries``
+        self.on_infra_retry: Callable[[dict], None] | None = None
         self.kernel = get_kernel(task.golden)
         self.num = task.numerics_obj
         self._vecs: list[tuple[str, Vec]] | None = None
@@ -148,10 +152,19 @@ class Verifier:
                     job.mkdir(parents=True, exist_ok=True)
                     rep.save(job / "report.json")
                 return rep
-            retries.append({"attempt": attempt + 1, "where": where, "detail": detail})
-            self.kill_leftovers()
-            if attempt < len(self.infra_backoff):
-                time.sleep(self.infra_backoff[attempt])
+            java = _java_alive()  # prima della pulizia: chi c'era quando è fallito
+            killed = self.kill_leftovers()
+            wait = self.infra_backoff[attempt] if attempt < len(self.infra_backoff) else None
+            info = {"attempt": attempt + 1, "where": where, "detail": detail, "tag": tag,
+                    "wait_s": wait, "java": java, "killed": killed}
+            retries.append(info)
+            if wait is not None:  # segue un nuovo tentativo
+                if self.on_infra_retry is not None:
+                    try:
+                        self.on_infra_retry(dict(info))
+                    except Exception:  # noqa: BLE001 - il tracciamento non ferma la verifica
+                        pass
+                time.sleep(wait)
         rep = VerifyReport(tag, self.task.name, "infra", False, infra=detail, infra_retries=retries,
                            error_keys=[f"infra:{detail[:120]}"])
         job.mkdir(parents=True, exist_ok=True)
@@ -307,6 +320,15 @@ class Verifier:
         rep.seconds["total"] = round(time.monotonic() - t0, 2)
         rep.save(job / "report.json")
         return rep
+
+
+def _java_alive(limit: int = 12) -> list[str]:
+    """JVM vive dell'utente come ``pid:ruolo:thread`` (vuoto senza /proc)."""
+    try:
+        me = procs.os.getuid() if hasattr(procs.os, "getuid") else None
+        return [f"{p.pid}:{p.role}:{p.threads}" for p in procs.procs(me) if p.is_java][:limit]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 class _InfraHit(Exception):

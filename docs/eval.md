@@ -199,7 +199,12 @@ La campagna principale ha 910 job:
   Non sono errori del candidato:
   - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
     60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;
-    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`;
+    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`.
+    Ogni nuovo tentativo lascia nel trace un evento `infra_retry` (`attempt`,
+    `wait_s`, `where`, `tag`, `reason`, `java`: JVM vive dell'utente come
+    `pid:ruolo:thread` al momento dell'errore, `killed`: pid terminati prima di
+    riprovare), anche se poi l'errore persiste; `result.json` li riporta in
+    `infra_retries` (lista vuota se non ce ne sono);
   - il feedback non arriva mai al modello e non consuma iterazioni, reflect, dedup
     né anti-loop: dal punto di vista del ciclo la verifica non è mai avvenuta;
   - se l'errore persiste la run si ferma con `status: "error"`, `reason: "infra:

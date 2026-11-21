@@ -45,8 +45,8 @@ from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
-                     llm_result_fields, write_result)
+                     expected_cache_origins, infra_retry_fields, llm_cache_fields,
+                     llm_calls_to_pass, llm_result_fields, retry_event, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b", "baseline-b-matched")
@@ -135,6 +135,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                                 max_examples=cfg.sim.max_examples, sim_timeout=cfg.sim.timeout_s,
                                 ddmin_rounds=cfg.sim.ddmin_rounds, jvm_cpus=cfg.sim.jvm_cpus)
             own_verifier = True
+        if getattr(verifier, "on_infra_retry", "x") is None:  # evento infra_retry nel trace
+            verifier.on_infra_retry = lambda info: rec.event("infra_retry", **retry_event(info))
         verify_fn = verifier.verify
 
     messages = [
@@ -178,6 +180,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
                 **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
+                **infra_retry_fields(rec.events),
                 "history_truncations": truncations, "history_truncated_calls": truncated_calls,
                 "max_fix_iters": st.max_fix_iters,
                 "duplicates": 0, "ppa": None})

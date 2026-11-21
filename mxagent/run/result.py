@@ -136,6 +136,21 @@ def same_run(origin: str | None, run_dir: Path) -> bool:
 #: il risultato ripete un'esecuzione precedente. Le risposte senza provenienza (voci di
 #: cache scritte prima del campo ``origin``) contano come estranee. Le run con una parte
 #: delle chiamate nuove non sono replayed (``llm_cached_fraction``, elencate a parte).
+def retry_event(info: dict) -> dict[str, Any]:
+    """Campi dell'evento ``infra_retry`` da un elemento di ``VerifyReport.infra_retries``."""
+    return {"attempt": info.get("attempt"), "wait_s": info.get("wait_s"), "where": info.get("where"),
+            "tag": info.get("tag"), "reason": info.get("detail"), "java": info.get("java"),
+            "killed": info.get("killed")}
+
+
+def infra_retry_fields(events: list[dict]) -> dict[str, Any]:
+    """``infra_retries`` di result.json: un elemento per ogni nuovo tentativo di verifica
+    dopo un errore di sistema (eventi ``infra_retry`` del trace)."""
+    keys = ("attempt", "wait_s", "where", "tag", "reason", "java", "killed")
+    return {"infra_retries": [{k: e.get(k) for k in keys} for e in events
+                              if e.get("kind") == "infra_retry"]}
+
+
 def llm_cache_fields(events: list[dict], expected: list[Path] | None = None) -> dict[str, Any]:
     """``llm_cached_calls``, ``llm_cached_expected``, ``llm_cached_fraction`` e
     ``replayed`` dagli eventi ``llm`` (``cache_origin`` = run che aveva la risposta)."""

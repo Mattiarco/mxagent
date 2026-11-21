@@ -32,8 +32,9 @@ from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
 from ..run.result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                          expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
-                          llm_result_fields, ppa_attempts, write_result)
+                          expected_cache_origins, infra_retry_fields, llm_cache_fields,
+                          llm_calls_to_pass, llm_result_fields, ppa_attempts, retry_event,
+                          write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..verify import chisel
@@ -72,7 +73,8 @@ class Orchestrator:
             library = Library(cfg.library.path, Embedder(emb.model if emb else None, cfg.llm.host))
         self.library = library if cfg.agent.library else None
         self.ctx = AgentContext(cfg, llm, self.rec, self.library, seed, task.name)
-        self._vf = verifier_factory or self._make_verifier
+        factory = verifier_factory or self._make_verifier
+        self._vf = lambda t, n: self._track_infra(factory(t, n))
         self._synth = synth_fn or synthesize  # (verilog, task, cfg, work, backends) -> PPAReport
         self.sbt_ws = self.rec.root / "sbt"
         self.states: list[str] = []
@@ -98,6 +100,13 @@ class Orchestrator:
                         random_vectors=s.random_vectors, seed=s.seed, max_examples=s.max_examples,
                         sim_timeout=s.timeout_s, ddmin_rounds=s.ddmin_rounds,
                         sbt_workspace=self.sbt_ws, jvm_cpus=s.jvm_cpus)
+
+    def _track_infra(self, v):
+        """Ogni nuovo tentativo di verifica dopo un errore di sistema lascia un evento
+        ``infra_retry`` (tentativo, attesa, motivo, JVM vive)."""
+        if hasattr(v, "on_infra_retry") and v.on_infra_retry is None:
+            v.on_infra_retry = lambda info: self.rec.event("infra_retry", **retry_event(info))
+        return v
 
     def _state(self, name: str, **data) -> None:
         self.states.append(name)
@@ -558,6 +567,7 @@ class Orchestrator:
                 "llm_to_pass": self._llm_at_pass,
                 "llm_calls_to_pass": self._calls_to_pass if (final and final.passed) else None,
                 **llm_cache_fields(self.rec.events, expected_cache_origins(self.rec.root)),
+                **infra_retry_fields(self.rec.events),
                 "duplicates": c.get("duplicates", 0),
                 "ppa": None if not out else {
                     "objective": opt.get("objective"), "gain": opt.get("gain"), "stop": opt.get("stop"),
