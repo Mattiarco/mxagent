@@ -66,6 +66,7 @@ sim:
   simulator: verilator
   sbt_mode: client      # server sbt persistente: compilazione ~1 s a caldo (batch: ~7 s)
   jvm_cpus: 4           # -XX:ActiveProcessorCount delle JVM di sbt: thread di GC/JIT/pool fissi
+  sbt_server_start_s: 240  # server sbt non partito entro N s -> errore di sistema e retry
   max_examples: 3
   ddmin_rounds: 8
   random_vectors: 2000

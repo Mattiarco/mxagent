@@ -103,7 +103,8 @@ class Orchestrator:
         return Verifier(task, self.rec.root / "verify" / name, sbt_mode=s.sbt_mode,
                         random_vectors=s.random_vectors, seed=s.seed, max_examples=s.max_examples,
                         sim_timeout=s.timeout_s, ddmin_rounds=s.ddmin_rounds,
-                        sbt_workspace=self.sbt_ws, jvm_cpus=s.jvm_cpus)
+                        sbt_workspace=self.sbt_ws, jvm_cpus=s.jvm_cpus,
+                        server_start_s=s.sbt_server_start_s)
 
     def _track_infra(self, v):
         """Ogni nuovo tentativo di verifica dopo un errore di sistema lascia un evento

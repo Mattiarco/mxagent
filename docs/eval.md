@@ -210,6 +210,11 @@ La campagna principale ha 910 job:
   il server morto a metà comando, log con solo `[error] Total time: 1 s`). Un
   timeout della compilazione e le eccezioni di elaborazione senza posizione nel
   sorgente (`ChiselException`, `StackOverflowError`) restano errori del candidato.
+  Eccezione: in modalità client, se il server non c'era all'inizio del comando e
+  `project/target/active.json` non compare entro `sim.sbt_server_start_s` (240 s),
+  il client sta aspettando un server che non è partito (es. la JVM non ha potuto
+  creare thread): il comando viene interrotto ed è `sbt_server` ("sbt server did not
+  start"), senza aspettare i 900 s di `sim.timeout_s`.
   Non sono errori del candidato:
   - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
     60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;

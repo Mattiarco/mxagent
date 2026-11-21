@@ -138,6 +138,9 @@ class SimConfig(_Strict):
     #: CPU viste da ogni JVM di sbt (-XX:ActiveProcessorCount): fissa i thread del GC, del
     #: JIT e dei pool di sbt invece di dimensionarli su tutti i core (0/null = nessun limite)
     jvm_cpus: int | None = 4
+    #: secondi entro cui il server di sbt --client deve partire (active.json), altrimenti
+    #: errore di sistema e retry invece di aspettare timeout_s (0/null = nessun limite)
+    sbt_server_start_s: int | None = 240
     max_examples: int = 3  # vettori minimi riportati nel feedback
     ddmin_rounds: int = 8
     random_vectors: int = 2000

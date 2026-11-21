@@ -239,6 +239,11 @@ def _finish(errs: list[SourceError], src_dir: Path | None) -> list[SourceError]:
 #: dei pool di sbt/zinc/Scala: con tutti i core di una macchina grande (20 sul DGX Spark)
 #: un server sbt per run tiene un centinaio di thread. Il Verilog prodotto non cambia.
 DEFAULT_JVM_CPUS = 4
+#: tempo massimo perché il server di ``sbt --client`` scriva ``active.json``: oltre, il
+#: comando viene interrotto come errore di sistema invece di aspettare tutto il timeout
+DEFAULT_SERVER_START_S = 240
+#: prefisso del motivo (riconosciuto da infra.SBT_SERVER)
+SERVER_NOT_STARTED = "sbt server did not start"
 
 
 def sbt_env(jvm_cpus: int | None = DEFAULT_JVM_CPUS) -> dict[str, str]:
@@ -277,8 +282,24 @@ def sbt_cmd(mode: str, command: str) -> list[str]:
     return ["sbt", "-batch", "-Dsbt.supershell=false", command]
 
 
+def server_watch(work: Path, start_s: float | None):
+    """``watch`` di :func:`run` per ``sbt --client``: se all'inizio del comando il server
+    non c'è (nessun ``active.json``) e non compare entro ``start_s`` secondi, il client
+    sta aspettando un server che non è partito (es. la JVM non ha potuto creare thread).
+    None se il server c'è già o senza limite."""
+    if not start_s or active_file(work).is_file():
+        return None
+
+    def watch(elapsed: float) -> str | None:
+        if elapsed >= start_s and not active_file(work).is_file():
+            return f"{SERVER_NOT_STARTED} in {elapsed:.0f}s (no {active_file(work).name})"
+        return None
+    return watch
+
+
 def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch",
-              timeout: float = 900, jvm_cpus: int | None = DEFAULT_JVM_CPUS) -> ElabResult:
+              timeout: float = 900, jvm_cpus: int | None = DEFAULT_JVM_CPUS,
+              server_start_s: float | None = DEFAULT_SERVER_START_S) -> ElabResult:
     """Compila ed elabora ``<pkg>.<top>``; emette SystemVerilog in ``out_dir``."""
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -288,13 +309,16 @@ def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch"
     # client: il server sbt (JVM persistente) deve sopravvivere al comando; lo chiude
     # Verifier.close. batch: a fine comando nessun processo del gruppo resta vivo.
     r: Result = run(sbt_cmd(mode, cmd), cwd=work, timeout=timeout,
-                    env=sbt_env(jvm_cpus), keep_group=mode == "client")
+                    env=sbt_env(jvm_cpus), keep_group=mode == "client",
+                    watch=server_watch(work, server_start_s) if mode == "client" else None)
     log = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.log)
     src_dir = work / "src" / "main" / "scala" / pkg
     verilog = sorted([*out_dir.rglob("*.sv"), *out_dir.rglob("*.v")])
     if r.timed_out:
         return ElabResult(False, [SourceError("sbt", f"timeout dopo {timeout:.0f}s")], [], r.seconds, log,
                           r.returncode, timed_out=True)
+    if r.aborted:  # server non partito: errore di sistema (infra.classify_build -> sbt_server)
+        return ElabResult(False, [SourceError("sbt", r.aborted)], [], r.seconds, log, None)
     if not r.ok or not verilog:
         errs = parse_sbt_log(log, src_dir, pkg) or [SourceError("sbt", "elaborazione fallita senza "
                                                                "errori riconoscibili")]

@@ -266,7 +266,8 @@ def test_verification_that_times_out_leaves_no_children(tmp_path, monkeypatch):
     pidf = tmp_path / "pid"
     monkeypatch.setattr(chisel, "sbt_cmd", lambda mode, c: [sys.executable, "-c", CHILD,
                                                              str(pidf), "hang"])
-    monkeypatch.setattr(chisel.elaborate, "__defaults__", ("batch", 3, chisel.DEFAULT_JVM_CPUS))
+    monkeypatch.setattr(chisel.elaborate, "__defaults__", ("batch", 3, chisel.DEFAULT_JVM_CPUS,
+                                                         chisel.DEFAULT_SERVER_START_S))
     v = Verifier(TASK, tmp_path / "v", sbt_mode="batch", infra_backoff=())
     rep = v.verify({"E2M1Decode.scala": "import chisel3._\nclass E2M1Decode extends RawModule {}"},
                    "c00")

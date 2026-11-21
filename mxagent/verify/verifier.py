@@ -77,13 +77,15 @@ class Verifier:
                  sim_timeout: float = 900, ddmin_rounds: int = 8, max_vectors: int = 200_000,
                  sbt_workspace: Path | None = None,
                  infra_backoff: tuple[float, ...] = (10, 30, 60),
-                 jvm_cpus: int | None = chisel.DEFAULT_JVM_CPUS):
+                 jvm_cpus: int | None = chisel.DEFAULT_JVM_CPUS,
+                 server_start_s: float | None = chisel.DEFAULT_SERVER_START_S):
         self.task = task
         self.work = Path(work_dir)
         # workspace sbt condivisibile fra più Verifier della stessa run (un solo server JVM)
         self.sbt_ws = Path(sbt_workspace) if sbt_workspace else self.work / "sbt"
         self.sbt_mode = sbt_mode
         self.jvm_cpus = jvm_cpus  # -XX:ActiveProcessorCount delle JVM di sbt
+        self.server_start_s = server_start_s  # server sbt --client non partito -> infra
         self.seed = seed
         self.n_random = random_vectors
         self.max_examples = max_examples
@@ -197,7 +199,7 @@ class Verifier:
         ws = chisel.prepare_workspace(self.sbt_ws)
         chisel.write_sources(ws, pkg, sources)
         el = chisel.elaborate(ws, pkg, self.task.top, job / "verilog", mode=self.sbt_mode,
-                              jvm_cpus=self.jvm_cpus)
+                              jvm_cpus=self.jvm_cpus, server_start_s=self.server_start_s)
         (job / "elaborate.log").write_text(el.log, encoding="utf-8")
         rep.compile, rep.seconds["compile"] = el.to_dict(), round(el.seconds, 2)
         if not el.ok:
