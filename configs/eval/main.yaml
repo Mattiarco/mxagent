@@ -34,6 +34,10 @@ ablations:
     no_memory:     {agent.memory_items: 0}
 
 library: {policy: fresh}           # niente leakage e niente dipendenza dall'ordine
+# cache LLM della campagna (<campagna>/llm_cache): nessuna risposta dalle campagne
+# precedenti in .cache/llm. baseline-b-matched riprende dalla cache le richieste che
+# coincidono con la baseline-b appaiata: attese, non la rendono replayed (docs/eval.md).
+llm_cache: campaign
 
 # Task fuori dai totali principali del report, ognuno in una sezione a parte.
 # card_leak: in `full` la scheda di dominio (format_card -> e2m1_table) contiene la

@@ -160,9 +160,21 @@ class Runner:
                     pass
         elif self.c.ppa_backends:
             entry["ppa"] = self.synth_run(j, run_dir)
+        killed = self._kill_jvms(run_dir)
+        if killed:
+            entry["jvm_killed"] = killed
         self._clean(run_dir)
         self._append(entry)
         return entry
+
+    @staticmethod
+    def _kill_jvms(run_dir: Path) -> list[int]:
+        """Nessuna JVM della run (server sbt della run o di eval_synth) sopravvive al job."""
+        from ..util import procs
+        try:
+            return procs.kill_pids([p.pid for p in procs.java_under(run_dir)])
+        except OSError:
+            return []
 
     def _clean(self, run_dir: Path) -> None:
         """Dopo eval_synth/eval_wrap (che ricompilano): via sbt/target e oggetti di Verilator."""

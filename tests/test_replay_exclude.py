@@ -72,9 +72,10 @@ def test_partial_cache_is_not_replayed(tmp_path):
     assert llm.requests == 1 and res["passed"]
     assert (res["replayed"], res["llm_cached_calls"], res["llm_cached_fraction"]) == (False, 1, 0.5)
     assert llm_cache_fields([{"kind": "llm", "cached": True}, {"kind": "llm", "cached": False}]) == \
-        {"llm_cached_calls": 1, "llm_cached_fraction": 0.5, "replayed": False}
-    assert llm_cache_fields([]) == {"llm_cached_calls": 0, "llm_cached_fraction": None,
-                                    "replayed": False}
+        {"llm_cached_calls": 1, "llm_cached_expected": 0, "llm_cached_fraction": 0.5,
+         "replayed": False}
+    assert llm_cache_fields([]) == {"llm_cached_calls": 0, "llm_cached_expected": 0,
+                                    "llm_cached_fraction": None, "replayed": False}
 
 
 def test_no_llm_cache_flag_and_campaign_policies(tmp_path):
@@ -208,3 +209,111 @@ def test_report_exclude_from_cli_on_an_old_campaign(tmp_path, capsys):
     assert S["report_exclude"] == {"b01_e2m1_decode": "card_leak"}
     with pytest.raises(SystemExit):
         write_report(d, {"b99_nope": "x"})
+
+
+# ------------------------------------------- baseline-b-matched e cache della B appaiata
+def _job_campaign(tmp: Path, cache: Path):
+    """Campagna vera su disco: per ogni seed baseline-b e poi baseline-b-matched (stessa
+    cache, come nell'ordine dei job), più una full con tutte le risposte dalla cache di
+    una campagna PRECEDENTE (provenienza estranea)."""
+    c = Campaign.model_validate({"name": "pair", "tasks": ["b01_e2m1_decode"], "seeds": 2,
+                                 "modes": ["baseline-b", "baseline-b-matched", "full"],
+                                 "models": {"m": {"all": "x:1b"}}, "ppa_backends": [],
+                                 "llm_cache": "campaign"})
+    (tmp / "campaign.json").write_text(json.dumps({"campaign": c.model_dump(mode="json")}))
+    idx, llms = [], {}
+    for j in jobs(c, tmp):
+        rd = tmp / "runs" / j.id
+        if j.mode == "full":  # run full "vecchia": 3 chiamate tutte dalla cache di un'altra campagna
+            rd.mkdir(parents=True)
+            old = f"/home/u/mxagent/evals/previous/runs/{j.id}"
+            (rd / "trace.json").write_text(json.dumps(
+                [{"kind": "llm", "cached": True, "cache_origin": old}] * 3
+                + [{"kind": "verify", "module": "E2M1Decode", "passed": True}]))
+            (rd / "metrics.json").write_text(json.dumps({"task": j.task, "mode": j.mode,
+                                                         "passed": True, "llm": {"calls": 3}}))
+            (rd / "result.json").write_text(json.dumps({"passed": True, "status": "done"}))
+        else:
+            llm = FakeBackend([BAD, GOOD], cache)
+            run_loop(TASK, CFG, j.mode, seed=j.seed, role=ROLE, runs_dir=tmp / "runs", llm=llm,
+                     verify_fn=fake_verify, run_id=j.id)
+            llms[j.id] = llm
+        idx.append({"job": j.id, "status": "done", "run_dir": f"runs/{j.id}"})
+    (tmp / "index.jsonl").write_text("\n".join(json.dumps(e) for e in idx))
+    return c, llms
+
+
+def test_matched_answers_from_paired_b_are_expected_not_replayed(tmp_path, capsys):
+    c, llms = _job_campaign(tmp_path, tmp_path / "llm_cache")
+    for s in (0, 1):
+        b = f"b01_e2m1_decode__baseline-b__main__m__s{s}"
+        m = f"b01_e2m1_decode__baseline-b-matched__main__m__s{s}"
+        assert llms[b].requests == 2 and llms[m].requests == 0  # matched: tutto dalla cache di B
+        res = _res(tmp_path / "runs" / m)
+        assert res["passed"] and res["llm_calls_to_pass"] == 2
+        assert (res["llm_cached_calls"], res["llm_cached_expected"], res["replayed"]) == (2, 2, False)
+        ev = [e for e in json.loads((tmp_path / "runs" / m / "trace.json").read_text())
+              if e["kind"] == "llm"]
+        assert all(e["cached"] and e["cache_origin"].replace("\\", "/").endswith(f"runs/{b}")
+                   for e in ev)  # verificabile: da quale run viene ogni risposta
+    S = write_report(tmp_path)
+    err = capsys.readouterr().err
+    assert "WARNING: 2 run replayed" in err  # solo le full
+    assert {(r["mode"], r["seed"]) for r in S["replayed"]["runs"]} == {("full", 0), ("full", 1)}
+    tot = S["success"]["m"]
+    assert (tot["baseline-b-matched"]["total"]["k"], tot["baseline-b-matched"]["total"]["n"]) == (2, 2)
+    assert tot["full"]["total"]["n"] == 0  # replayed: fuori dai totali
+    cm = S["calls_matched"]["m"]  # le chiavi appaiate perdono la full replayed
+    assert cm["missing_modes"] == ["full"] and cm["by_k"][7]["baseline-b-matched"] == 2
+    curve = (tmp_path / "calls_curve.csv").read_text().splitlines()
+    assert "main,m,baseline-b-matched,2,2,2" in curve
+
+
+def test_matched_with_foreign_cached_answers_is_replayed(tmp_path):
+    """Matched con tutte le risposte da una campagna precedente (o senza provenienza)."""
+    from mxagent.run.result import expected_cache_origins, llm_cache_fields
+    rd = tmp_path / "evals" / "main" / "runs" / "t__baseline-b-matched__main__m__s0"
+    exp = expected_cache_origins(rd)
+    assert exp[1].name == "t__baseline-b__main__m__s0"
+    paired = str(tmp_path / "evals" / "main" / "runs" / "t__baseline-b__main__m__s0")
+    other = "/x/evals/old/runs/t__baseline-b__main__m__s0"  # stesso job id, altra campagna
+    ev = lambda *o: [{"kind": "llm", "cached": True, "cache_origin": x} for x in o]  # noqa: E731
+    assert llm_cache_fields(ev(paired, paired), exp)["replayed"] is False
+    assert llm_cache_fields(ev(other, other), exp)["replayed"] is True
+    assert llm_cache_fields(ev(paired, other), exp)["replayed"] is True  # una estranea basta
+    assert llm_cache_fields(ev(None, None), exp)["replayed"] is True  # voci senza provenienza
+    # la B non è "appaiata" a sé stessa: una B tutta dalla cache di un'altra campagna è replayed
+    b = tmp_path / "evals" / "main" / "runs" / "t__baseline-b__main__m__s0"
+    assert llm_cache_fields(ev(other), expected_cache_origins(b))["replayed"] is True
+
+
+def test_full_run_from_previous_campaign_cache_is_still_replayed(tmp_path):
+    from tests.test_agents import B01, cfg, code
+    from mxagent.agents.orchestrator import Orchestrator
+    from tests.test_agents import FakeVerifier
+    cache = tmp_path / "cache"
+
+    def full(runs):
+        log = []
+        llm = FakeBackend([code("E2M1Decode")], cache)
+        o = Orchestrator(B01, cfg(**{"agent.decompose": False}), seed=1, runs_dir=runs, llm=llm,
+                         verifier_factory=lambda t, n: FakeVerifier(t, log),
+                         run_id="b01_e2m1_decode__full__main__m__s0")
+        o.run()
+        return _res(o.rec.root), llm
+    first, l1 = full(tmp_path / "evals" / "previous" / "runs")
+    again, l2 = full(tmp_path / "evals" / "main" / "runs")  # stesso job id, nuova campagna
+    assert l1.requests == 1 and l2.requests == 0
+    assert first["replayed"] is False and again["replayed"] is True
+
+
+def test_main_campaign_uses_campaign_cache(tmp_path, capsys):
+    for f in ("main.yaml", "b04_b05.yaml"):
+        c = load_campaign(ROOT / "configs" / "eval" / f)
+        assert c.llm_cache == "campaign"
+        assert all(dict(j.overrides)["llm.cache_dir"].endswith("/llm_cache") for j in jobs(c, tmp_path))
+    from mxagent import cli
+    assert cli.main(["eval", "--campaign", str(ROOT / "configs" / "eval" / "main.yaml"), "--dry-run",
+                     "--parallel", "2", "--out", str(tmp_path / "main")]) == 0
+    out = capsys.readouterr().out
+    assert "cache LLM: della campagna" in out and "parallel: 2 job insieme" in out

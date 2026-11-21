@@ -118,6 +118,9 @@ class LLMResponse:
     cost_usd: float | None = None
     #: adattamenti interni al backend per questa chiamata (es. formato JSON non vincolato)
     notes: list[str] = field(default_factory=list)
+    #: cartella della run che ha ottenuto la risposta dal modello (salvata nella cache: una
+    #: risposta letta dalla cache dice da quale run viene). None = voce senza provenienza
+    origin: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -142,6 +145,8 @@ class BaseChat:
     def __init__(self, cache_dir: str | Path | None = ".cache/llm", timeout: float = 300,
                  max_retries: int = 2, budget: Budget | None = None):
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        #: run che usa questo client (cartella): finisce in ``origin`` delle risposte nuove
+        self.origin: str | None = None
         self.timeout = float(timeout)
         self.max_retries = max_retries
         self.budget = budget
@@ -179,6 +184,7 @@ class BaseChat:
             r.cached, r.timeouts = True, []  # i timeout di allora non si ripetono
         else:
             r = self._call(payload)
+            r.origin = self.origin  # la provenienza non entra nella chiave
             if cfile and not r.error:  # un timeout non si mette mai in cache
                 cfile.parent.mkdir(parents=True, exist_ok=True)
                 cfile.write_text(json.dumps(r.to_dict()), encoding="utf-8")

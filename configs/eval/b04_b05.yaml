@@ -25,5 +25,9 @@ models:
   qwen32b: {all: "qwen2.5-coder:32b"}
 
 library: {policy: fresh}           # niente leakage e niente dipendenza dall'ordine
+# cache LLM della campagna (<campagna>/llm_cache): nessuna risposta dalle campagne
+# precedenti in .cache/llm. baseline-b-matched riprende dalla cache le richieste che
+# coincidono con la baseline-b appaiata: attese, non la rendono replayed (docs/eval.md).
+llm_cache: campaign
 # sintesi del design finale di ogni run passata (tutte le modalità): ADP, LUT/FF, Fmax
 ppa_backends: [generic, ecp5, xc7, nextpnr]

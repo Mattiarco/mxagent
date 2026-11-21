@@ -128,17 +128,34 @@ La campagna principale ha 910 job:
   - le risposte sono in cache (`llm.cache_dir`, default `.cache/llm`), con chiave
     richiesta completa + seed + digest del modello. Rieseguire un job già eseguito
     (anche in un'altra campagna sulla stessa macchina) riprende le risposte: la run
-    dura secondi e **non è un risultato nuovo**. `result.json` registra
-    `llm_cached_calls`, `llm_cached_fraction` e `replayed` (vero se *tutte* le
-    chiamate della run vengono dalla cache). Il report esclude le run replayed dai
+    dura secondi e **non è un risultato nuovo**. Ogni voce di cache registra la
+    cartella della run che ha ottenuto la risposta (`origin`) e l'evento `llm` di una
+    risposta letta dalla cache la riporta in `cache_origin`: da quale run viene ogni
+    risposta è verificabile nel trace. `result.json` registra `llm_cached_calls`,
+    `llm_cached_expected`, `llm_cached_fraction` e `replayed`: vero se *tutte* le
+    chiamate vengono dalla cache **e** almeno una da una run diversa da quelle attese.
+    Attese sono la run stessa (un tentativo precedente dello stesso job, es. dopo un
+    errore di sistema) e, per `baseline-b-matched`, la `baseline-b` appaiata della
+    stessa campagna (stessi task, seed e modelli): matched usa gli stessi prompt e
+    seed di B, quindi le sue prime 1 + `max_fix_iters` richieste coincidono per
+    costruzione con quelle di B e le riprende dalla cache. Una matched che passa
+    entro quelle chiamate ha tutte le risposte dalla B appaiata e **non** è replayed:
+    resta nei totali e nella curva per k. Il confronto delle provenienze usa
+    campagna/runs/job (regge lo spostamento della cartella, non confonde due
+    campagne con gli stessi id di job); le voci di cache scritte prima del campo
+    `origin` contano come estranee, quindi una run tutta dalla cache di una campagna
+    precedente resta replayed. Il report ricalcola il campo dal trace con la stessa
+    funzione della run. Il report esclude le run replayed dai
     tassi principali, le elenca in una sezione a parte e avvisa (su stderr e in
     testa a `report.md`/`summary.md`) senza fallire. Le run con solo una parte
     delle chiamate in cache restano nei totali e sono elencate con la frazione;
   - per rieseguire senza cache: `mxagent run --no-llm-cache` (equivale a
     `--set llm.cache_dir=null`), oppure nella campagna `llm_cache: off` o
     `mxagent eval --llm-cache off`. Con `llm_cache: campaign` la cache è
-    `<campagna>/llm_cache`: campagne diverse non condividono risposte. Il default
-    `shared` è il comportamento di prima. La cache esistente non viene cancellata;
+    `<campagna>/llm_cache`: campagne diverse non condividono risposte; è
+    l'impostazione di [main.yaml](../configs/eval/main.yaml) e
+    [b04_b05.yaml](../configs/eval/b04_b05.yaml). Il default `shared` è il
+    comportamento di prima. La cache esistente non viene cancellata;
   - `meta.json` di ogni run registra il digest del modello, l'hash dei prompt e
     le versioni degli strumenti;
   - `campaign.json` registra la campagna e il suo hash.
@@ -166,6 +183,39 @@ La campagna principale ha 910 job:
   distinti dai fallimenti del modello. Il report li elenca e li esclude dai tassi.
   Se la run ha lasciato `result.json` (es. `interrupted` per SIGHUP), il suo
   stato è riportato in `result_status`.
+- **Errori di sistema durante la verifica** ([infra.py](../mxagent/verify/infra.py),
+  unico elenco di pattern): "unable to create native thread", "Resource temporarily
+  unavailable" / Errno 11 / EAGAIN, "Cannot allocate memory", `OutOfMemoryError` e
+  altri errori fatali della JVM, "Too many open files", "No space left on device",
+  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Non sono
+  errori del candidato:
+  - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
+    60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;
+    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`;
+  - il feedback non arriva mai al modello e non consuma iterazioni, reflect, dedup
+    né anti-loop: dal punto di vista del ciclo la verifica non è mai avvenuta;
+  - se l'errore persiste la run si ferma con `status: "error"`, `reason: "infra:
+    ..."` (report `stage: "infra"`), senza `metrics.json`: il runner la registra come
+    `error`, il report la mette fra gli errori di infrastruttura (esclusi dai tassi)
+    e `--retry-errors` la riesegue. Lo stesso per ogni `OSError` non gestito (es.
+    `BlockingIOError` al fork). Identico in `baseline-a`, `baseline-b`,
+    `baseline-b-matched` e `full` (tutti passano da `Verifier.verify`).
+  - Eccezione: nello stadio PPA, dopo il pass, un errore di sistema ferma solo
+    l'ottimizzazione (`ppa_error`); il pass resta valido.
+  - Un `OutOfMemoryError: Java heap space` causato da un design enorme sarebbe
+    deterministico: dopo i tentativi la run finisce in `error`, non in `failed`.
+- **Processi:** ogni comando esterno parte in un process group proprio; su timeout,
+  interruzione (Ctrl-C, SIGTERM, SIGHUP) e a comando finito il gruppo riceve
+  SIGTERM e poi SIGKILL (salvo il server di `sbt --client`, chiuso a fine run). A
+  fine run e a fine job vengono terminate le JVM con la directory di lavoro nella
+  cartella della run (`jvm_killed` nel trace e in `index.jsonl`).
+- **Controllo delle risorse:** `mxagent eval` controlla prima di partire il limite
+  sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto a parallel x
+  picco stimato per job (2·cpu+60 thread del server sbt, cpu+30 del client,
+  firtool, cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux, sintesi), e la
+  presenza di JVM di sbt orfane; se non basta si ferma con il motivo (`--force` per
+  partire comunque). Diagnosi: `scripts/check_resources.sh` oppure `mxagent doctor
+  --resources --parallel N [--kill-orphans]`. Il dry-run mostra parallel e la stima.
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.

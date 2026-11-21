@@ -38,12 +38,15 @@ from ..agents.solver import log_llm_call
 from ..bench.task import Task
 from ..config import Config, ModelRole, profile_label
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, describe_llm, make_chat, model_digest
+from ..util import procs
+from ..verify.infra import infra_outcome
 from ..verify.verifier import VerifyReport, Verifier
 from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     llm_cache_fields, llm_calls_to_pass, llm_result_fields, write_result)
+                     expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
+                     llm_result_fields, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b", "baseline-b-matched")
@@ -114,6 +117,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     elif getattr(llm, "budget", None) is None:
         llm.budget = budget  # type: ignore[attr-defined]
     budget = getattr(llm, "budget", None) or budget
+    if hasattr(llm, "origin"):  # provenienza delle risposte che questa run mette in cache
+        llm.origin = str(rec.root.resolve())
     digest = model_digest(llm, role.model)
     rec.meta(task=task.name, mode=mode, seed=seed, model=role.model, model_profile=profile,
              models_by_role=models_by_role, model_digest=digest,
@@ -172,7 +177,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "solution": (best_info or {}).get("solution", "none"), "best": best_info,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
-                **llm_cache_fields(rec.events),
+                **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
                 "history_truncations": truncations, "history_truncated_calls": truncated_calls,
                 "max_fix_iters": st.max_fix_iters,
                 "duplicates": 0, "ppa": None})
@@ -218,7 +223,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                             "n_vectors": (rep.sim or {}).get("total")})
                         rec.event("verify", iter=it, stage=rep.stage, passed=rep.passed,
                                   score=list(rep.score), seconds=rep.seconds, feedback=rep.feedback,
-                                  error_keys=rep.error_keys)
+                                  error_keys=rep.error_keys,
+                                  **({"infra_retries": rep.infra_retries} if rep.infra_retries
+                                     else {}))
                         if prev_keys is not None and rep.error_keys and rep.error_keys == prev_keys:
                             repeated += 1
                         prev_keys = rep.error_keys
@@ -256,7 +263,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "history_truncated_calls": truncated_calls, "max_fix_iters": st.max_fix_iters,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
-                "llm": budget.to_dict(), **llm_cache_fields(rec.events),
+                "llm": budget.to_dict(),
+                **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
             }
             rec.write_json("metrics.json", metrics)
             return RunResult(rec.root, metrics, b, reports)
@@ -264,12 +272,22 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             outcome = {"status": "interrupted", "reason": f"signal {e.signame}"}
             raise
         except BaseException as e:
-            outcome = {"status": "failed", "reason": "exception",
-                       "error": f"{type(e).__name__}: {e}"[:500]}
+            # errore di sistema (verifica ripetuta invano, OSError): run non valutabile,
+            # stesso esito del sistema completo
+            outcome = (infra_outcome(e) if isinstance(e, Exception) else None) or {
+                "status": "failed", "reason": "exception", "error": f"{type(e).__name__}: {e}"[:500]}
+            if outcome["status"] == "error":
+                rec.event("infra_error", reason=outcome["reason"], error=outcome["error"])
             raise
         finally:
             if own_verifier and verifier is not None:
                 verifier.close()
+            try:  # nessuna JVM resta viva nella cartella della run
+                killed = procs.kill_pids([p.pid for p in procs.java_under(rec.root)])
+                if killed:
+                    rec.event("jvm_killed", pids=killed)
+            except Exception as e:  # noqa: BLE001
+                rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
             if not cfg.runs.keep_build_artifacts:
                 try:
                     rec.event("cleanup", **clean_run(rec.root))
