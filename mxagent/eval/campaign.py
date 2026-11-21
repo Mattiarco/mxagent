@@ -129,6 +129,11 @@ class Campaign(_Strict):
     #: task tolti dai totali principali del report, con il motivo (es. card_leak)
     report_exclude: dict[str, str] = {}
 
+    @field_validator("llm_cache", mode="before")
+    @classmethod
+    def _cache_yaml_off(cls, v: Any) -> Any:
+        return "off" if v is False else v  # YAML 1.1: `llm_cache: off` senza virgolette è false
+
     @field_validator("llm_cache")
     @classmethod
     def _cache(cls, v: str) -> str:

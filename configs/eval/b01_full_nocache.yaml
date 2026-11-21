@@ -1,0 +1,21 @@
+# b01 in full senza cache LLM: le 3 run full su b01 della campagna precedente avevano
+# TUTTE le risposte dalla cache (replayed). Qui ogni chiamata va al modello.
+# Stesso budget e stessa libreria (fresh) delle altre campagne; tieni in `models`
+# solo il profilo usato nella campagna da confrontare.
+#   mxagent eval --campaign configs/eval/b01_full_nocache.yaml --dry-run
+#   mxagent eval --campaign configs/eval/b01_full_nocache.yaml
+#   mxagent report --dir evals/b01_full_nocache
+# Il risultato resta fuori dai totali principali (card_leak): misura solo b01.
+name: b01_full_nocache
+config: configs/default.yaml
+tasks: [b01_e2m1_decode]
+modes: [full]
+seeds: 3
+seed_start: 0
+models:
+  qwen14b: {all: "qwen2.5-coder:14b"}
+  qwen32b: {all: "qwen2.5-coder:32b"}
+library: {policy: fresh}
+llm_cache: "off"                   # nessuna cache (tra virgolette: in YAML off = false): la cache esistente non viene toccata
+report_exclude: {b01_e2m1_decode: card_leak}
+ppa_backends: [generic]

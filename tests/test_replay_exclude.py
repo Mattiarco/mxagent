@@ -90,6 +90,11 @@ def test_no_llm_cache_flag_and_campaign_policies(tmp_path):
     assert all(dict(j.overrides)["llm.cache_dir"].endswith("/llm_cache") for j in jobs(camp, tmp_path))
     with pytest.raises(Exception):
         Campaign.model_validate({**base, "llm_cache": "sometimes"})
+    import yaml
+    assert Campaign.model_validate({**base, **yaml.safe_load("llm_cache: off")}).llm_cache == "off"
+    nc = load_campaign(ROOT / "configs" / "eval" / "b01_full_nocache.yaml")
+    assert nc.llm_cache == "off" and nc.modes == ["full"]
+    assert all(dict(j.overrides)["llm.cache_dir"] is None for j in jobs(nc, tmp_path))
     # report_exclude e llm_cache al default non cambiano l'hash delle campagne già eseguite
     ex = Campaign.model_validate({**base, "report_exclude": {"b01_e2m1_decode": "card_leak"}})
     assert ex.digest() == shared.digest() != off.digest()

@@ -326,6 +326,10 @@ def describe_campaign(c, r, todo: list) -> str:
          "budget di campagna: " + (f"{c.campaign_budget_s} s ({c.campaign_budget_s / 3600:.1f} h), "
                                    "poi skipped_budget" if c.campaign_budget_s else "nessuno"),
          f"libreria: {c.library.policy}" + (f" ({c.library.path}, sola lettura)" if c.library.path else ""),
+         "cache LLM: " + {"shared": f"condivisa ({cfg.llm.cache_dir}; job già eseguiti altrove "
+                                    "possono risultare replayed)",
+                          "campaign": f"della campagna ({(r.out / 'llm_cache').as_posix()})",
+                          "off": "nessuna (ogni chiamata va al modello)"}[c.llm_cache],
          "warm-up dei modelli a ogni cambio di profilo (fuori dal conteggio): "
          + ("sì" if c.warmup else "no"), "", "ordine di esecuzione:"]
     done = {j.id for j in js} - {j.id for j in todo}
