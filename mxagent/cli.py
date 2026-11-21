@@ -425,8 +425,9 @@ def describe_campaign(c, r, todo: list) -> str:
     n = len(todo)
     worst = n * b.max_wall_s
     L += ["", f"stima: ogni run si ferma a max_wall_s, quindi al più {n} x {b.max_wall_s} s = "
-              f"{worst / 3600:.1f} h di run, più la sintesi finale delle run passate "
-              f"(minuti per run). È un limite superiore, non una previsione."]
+              f"{worst / 3600:.1f} h di run (in sequenza: ~{worst / 86400:.1f} giorni), più la "
+              f"sintesi finale delle run passate (minuti per run). È un limite superiore, non "
+              f"una previsione."]
     if c.campaign_budget_s and worst >= c.campaign_budget_s:
         L.append(f"il limite superiore raggiunge il budget di campagna "
                  f"({c.campaign_budget_s / 3600:.1f} h): le ultime run potrebbero finire in "
