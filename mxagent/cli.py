@@ -158,6 +158,21 @@ def cmd_verify(a: argparse.Namespace) -> int:
     return 0 if rep.passed else 1
 
 
+def llm_cache_override(value: str | None, no_cache: bool = False) -> str | None | bool:
+    """``llm.cache_dir`` per ``--llm-cache`` di una run singola: ``off`` -> None (nessuna
+    cache: la cache su disco non si legge né si scrive), ``shared`` o assente -> False
+    (quella della config), altrimenti la cartella data (es. una cache solo per le prove)."""
+    if no_cache:
+        if value not in (None, "off"):
+            raise SystemExit("--no-llm-cache e --llm-cache sono alternativi")
+        return None
+    if value is None or value == "shared":
+        return False
+    if value == "off":
+        return None
+    return value
+
+
 def cmd_run(a: argparse.Namespace) -> int:
     import json
     import os
@@ -180,8 +195,9 @@ def cmd_run(a: argparse.Namespace) -> int:
         over["llm.backend"] = a.backend
     if a.llm_timeout:
         over["llm.timeout_s"] = a.llm_timeout
-    if a.no_llm_cache:  # la cache resta su disco: semplicemente non si legge né si scrive
-        over["llm.cache_dir"] = None
+    cache = llm_cache_override(a.llm_cache, a.no_llm_cache)
+    if cache is not False:
+        over["llm.cache_dir"] = cache
     for kv in a.set or []:
         k, v = kv.split("=", 1)
         import yaml as _yaml
@@ -523,9 +539,11 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--llm-timeout", type=float, default=None, metavar="S",
                     help="timeout di una chiamata al modello in secondi (default: llm.timeout_s, "
                          "oppure 300 per ollama e 120 per anthropic)")
-    rp.add_argument("--no-llm-cache", action="store_true",
-                    help="nessuna cache delle risposte LLM (llm.cache_dir=null): ogni chiamata va "
-                         "al modello; la cache esistente non viene toccata")
+    rp.add_argument("--llm-cache", default=None, metavar="off|shared|DIR",
+                    help="cache delle risposte LLM: off = nessuna (ogni chiamata va al modello, la "
+                         "cache esistente non viene toccata), shared = llm.cache_dir della config "
+                         "(default), DIR = una cartella propria (prove fuori campagna)")
+    rp.add_argument("--no-llm-cache", action="store_true", help="come --llm-cache off")
     rp.add_argument("--config", default="configs/default.yaml")
     rp.add_argument("--seed", type=int, default=0)
     rp.add_argument("--runs-dir", default=None, help="default $MXAGENT_RUNS o runs_dir della config")

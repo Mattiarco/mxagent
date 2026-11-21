@@ -149,8 +149,10 @@ La campagna principale ha 910 job:
     tassi principali, le elenca in una sezione a parte e avvisa (su stderr e in
     testa a `report.md`/`summary.md`) senza fallire. Le run con solo una parte
     delle chiamate in cache restano nei totali e sono elencate con la frazione;
-  - per rieseguire senza cache: `mxagent run --no-llm-cache` (equivale a
-    `--set llm.cache_dir=null`), oppure nella campagna `llm_cache: off` o
+  - per rieseguire senza cache: `mxagent run --llm-cache off` (o
+    `--no-llm-cache`; equivale a `--set llm.cache_dir=null`); `--llm-cache DIR` usa
+    una cache propria (prove fuori campagna che non toccano quella condivisa),
+    `--llm-cache shared` quella della config. Nella campagna `llm_cache: off` o
     `mxagent eval --llm-cache off`. Con `llm_cache: campaign` la cache è
     `<campagna>/llm_cache`: campagne diverse non condividono risposte; è
     l'impostazione di [main.yaml](../configs/eval/main.yaml) e
