@@ -187,8 +187,16 @@ La campagna principale ha 910 job:
   unico elenco di pattern): "unable to create native thread", "Resource temporarily
   unavailable" / Errno 11 / EAGAIN, "Cannot allocate memory", `OutOfMemoryError` e
   altri errori fatali della JVM, "Too many open files", "No space left on device",
-  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Non sono
-  errori del candidato:
+  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Nella
+  compilazione/elaborazione con sbt sono di sistema anche (`classify_build`): la JVM
+  terminata da un segnale (`sbt_signal`, exit < 0 o 134/135/137/139/143), client e
+  server che non si parlano (`sbt_server`: "Connection refused", server non avviato
+  o che non risponde), e un fallimento senza nessun errore riferito al sorgente,
+  cioè nessun errore scalac, firtool o di elaborazione nel log (`sbt_no_errors`; es.
+  il server morto a metà comando, log con solo `[error] Total time: 1 s`). Un
+  timeout della compilazione e le eccezioni di elaborazione senza posizione nel
+  sorgente (`ChiselException`, `StackOverflowError`) restano errori del candidato.
+  Non sono errori del candidato:
   - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
     60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;
     i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`;

@@ -55,10 +55,13 @@ class ElabResult:
     verilog: list[Path] = field(default_factory=list)
     seconds: float = 0.0
     log: str = ""
+    returncode: int | None = None
+    timed_out: bool = False
 
     def to_dict(self) -> dict:
         return {"ok": self.ok, "errors": [asdict(e) for e in self.errors],
-                "verilog": [str(p) for p in self.verilog], "seconds": round(self.seconds, 2)}
+                "verilog": [str(p) for p in self.verilog], "seconds": round(self.seconds, 2),
+                "returncode": self.returncode}
 
 
 # ----------------------------------------------------------------- workspace
@@ -290,12 +293,13 @@ def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch"
     src_dir = work / "src" / "main" / "scala" / pkg
     verilog = sorted([*out_dir.rglob("*.sv"), *out_dir.rglob("*.v")])
     if r.timed_out:
-        return ElabResult(False, [SourceError("sbt", f"timeout dopo {timeout:.0f}s")], [], r.seconds, log)
+        return ElabResult(False, [SourceError("sbt", f"timeout dopo {timeout:.0f}s")], [], r.seconds, log,
+                          r.returncode, timed_out=True)
     if not r.ok or not verilog:
         errs = parse_sbt_log(log, src_dir, pkg) or [SourceError("sbt", "elaborazione fallita senza "
                                                                "errori riconoscibili")]
-        return ElabResult(False, errs, [], r.seconds, log)
-    return ElabResult(True, [], verilog, r.seconds, log)
+        return ElabResult(False, errs, [], r.seconds, log, r.returncode)
+    return ElabResult(True, [], verilog, r.seconds, log, r.returncode)
 
 
 def _same_drive(a: Path, b: Path) -> bool:

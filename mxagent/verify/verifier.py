@@ -26,7 +26,7 @@ from ..bench.kernels import get_kernel
 from ..bench.task import Task
 from ..util import procs
 from . import chisel, lint
-from .infra import InfraError, classify, classify_exc
+from .infra import InfraError, classify, classify_build, classify_exc
 from .ddmin import complexity, minimize
 from .feedback import SimSummary, compare, patterns, pick_representatives, table_rows
 from .sim import Simulator
@@ -188,7 +188,12 @@ class Verifier:
         (job / "elaborate.log").write_text(el.log, encoding="utf-8")
         rep.compile, rep.seconds["compile"] = el.to_dict(), round(el.seconds, 2)
         if not el.ok:
-            self._infra(el.log + "\n" + "\n".join(e.message for e in el.errors), "compile")
+            # errore di sistema nel log, JVM uccisa da un segnale, server che non risponde, o
+            # sbt fallito senza nessun errore del sorgente (server morto): mai al modello
+            hit = classify_build(el.log, [(e.stage, e.message) for e in el.errors], el.returncode,
+                                 el.timed_out)
+            if hit:
+                raise _InfraHit(hit, "compile")
             rep.error_keys = [e.key() for e in el.errors]
             rep.feedback = "COMPILATION FAILED:\n" + "\n".join(e.render() for e in el.errors[:5])
             rep.feedback_raw = raw_build_log(el.log)

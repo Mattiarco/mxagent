@@ -10,7 +10,8 @@ Un candidato che non compila perché la JVM non riesce a creare un thread, o per
   reason ``infra: ...``. Il feedback non arriva mai al modello e non consuma
   iterazioni, reflect, dedup né anti-loop.
 
-La lista dei pattern è qui e solo qui (:data:`INFRA_PATTERNS`).
+La lista dei pattern è qui e solo qui (:data:`INFRA_PATTERNS`), insieme alla regola per
+i fallimenti di sbt senza errori del sorgente (:func:`classify_build`).
 """
 from __future__ import annotations
 
@@ -47,6 +48,53 @@ def classify(text: str | None) -> str | None:
         for kind, pat in INFRA_PATTERNS:
             if pat.search(line):
                 return f"{kind}: {' '.join(line.split())[:240]}"
+    return None
+
+
+#: client/server di sbt che non si parlano (server morto, non avviato, non risponde)
+SBT_SERVER = re.compile(
+    r"sbt server (?:could not|failed to|is not|did not)|server (?:failed to start|did not start|"
+    r"is not responding|was shut down)|Could not connect to (?:the )?(?:sbt )?server|"
+    r"Connection refused|Broken pipe|java\.net\.ConnectException|ServerAlreadyBootingException|"
+    r"sbt server is already booting", re.I)
+#: stadi di errore che riguardano il sorgente del candidato (vedi chisel.parse_sbt_log);
+#: "sbt" è il ripiego per le righe [error] che non indicano nessun errore del codice
+CODE_STAGES = ("scalac", "firtool", "elaboration")
+#: codici d'uscita 128 + segnale dello script sbt quando la JVM muore (ABRT, BUS, KILL,
+#: SEGV, TERM): firtool che abortisce dentro Chisel dà invece exit 1 con l'eccezione
+SIGNAL_EXIT = {134: "SIGABRT", 135: "SIGBUS", 137: "SIGKILL", 139: "SIGSEGV", 143: "SIGTERM"}
+
+
+def classify_build(log: str, errors: list[tuple[str, str]], returncode: int | None = None,
+                   timed_out: bool = False) -> str | None:
+    """Errore di sistema in una compilazione/elaborazione sbt fallita, altrimenti None.
+
+    ``errors``: (stadio, messaggio) estratti dal log. Di sistema se:
+
+    * il log o i messaggi contengono un pattern di :data:`INFRA_PATTERNS`;
+    * il processo è terminato per un segnale (``returncode`` < 0 o 128 + segnale);
+    * client e server di sbt non si parlano (:data:`SBT_SERVER`);
+    * nessun errore riguarda il sorgente (nessuno stadio in :data:`CODE_STAGES`):
+      sbt è fallito senza dire perché, es. il server è morto a metà comando e il
+      log contiene solo ``[error] Total time: 1 s``. -> ``sbt_no_errors``.
+
+    Un timeout resta un errore del candidato (un generatore che non termina).
+    """
+    hit = classify("\n".join([log or "", *(m for _, m in errors)]))
+    if hit:
+        return hit
+    if timed_out:
+        return None
+    if returncode is not None and returncode < 0:
+        return f"sbt_signal: processo terminato dal segnale {-returncode}"
+    if returncode in SIGNAL_EXIT:
+        return f"sbt_signal: exit {returncode} ({SIGNAL_EXIT[returncode]})"
+    for line in (log or "").splitlines():
+        if SBT_SERVER.search(line):
+            return f"sbt_server: {' '.join(line.split())[:240]}"
+    if not any(stage in CODE_STAGES for stage, _ in errors):
+        tail = [ln.strip() for ln in (log or "").splitlines() if ln.strip()][-3:]
+        return "sbt_no_errors: " + (" | ".join(tail)[:240] or "log vuoto")
     return None
 
 
