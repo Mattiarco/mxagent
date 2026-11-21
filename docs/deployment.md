@@ -76,7 +76,7 @@ tipicamente 20–60 minuti.
 | disco (toolchain + cache) | alcuni GB in `~/.local/mxagent` e `~/.cache/coursier` |
 | disco (modelli Ollama) | ~9 GB per `qwen2.5-coder:14b`, ~20 GB per `qwen2.5-coder:32b` (quantizzazione di default) |
 | GPU | consigliata per Ollama; con `qwen2.5-coder:32b` serve una GPU con memoria sufficiente a contenere il modello (≈ 20 GB+). Senza GPU Ollama usa la CPU ed è molto lento |
-| CPU / RAM | la verifica (sbt, Verilator) e la sintesi (Yosys, nextpnr) girano su CPU; più core accelerano `--parallel` nelle campagne |
+| CPU / RAM | la verifica (sbt, Verilator) e la sintesi (Yosys, nextpnr) girano su CPU; le run sono sempre una alla volta (una GPU, un Ollama) |
 
 ### Versioni bloccate
 
@@ -345,7 +345,7 @@ mxagent eval --campaign configs/eval/main.yaml --dry-run
 
 # 2. esecuzione: conviene lanciarla in tmux, è lunga
 tmux new -s eval
-mxagent eval --campaign configs/eval/main.yaml --parallel 2
+mxagent eval --campaign configs/eval/main.yaml      # un job alla volta
 
 # 3. ripresa dopo un'interruzione: stesso comando, i job completati vengono saltati
 mxagent eval --campaign configs/eval/main.yaml
@@ -372,8 +372,9 @@ Note sulla riproducibilità:
 - `meta.json` di ogni run registra il digest del modello, l'hash dei prompt e le
   versioni della toolchain. Un modello con digest diverso (per esempio
   aggiornato con `ollama pull`) può dare risultati diversi;
-- `--parallel N` sovrappone LLM e verifica/sintesi; Ollama serializza comunque
-  le richieste sulla stessa GPU.
+- i job girano uno alla volta e un lock (`~/.cache/mxagent/run.lock`) impedisce
+  di lanciare un'altra run o campagna mentre una è in corso: il tempo di ogni run
+  non dipende da altre run sulla stessa GPU.
 
 ---
 
