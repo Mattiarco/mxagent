@@ -59,13 +59,22 @@ class Port(BaseModel):
         return self.elem_width * self.elems
 
     def chisel_type(self) -> str:
-        t = "SInt" if self.type == "sint" and self.elems == 1 else "UInt"
+        """Espressione Chisel della porta, es. ``Input(SInt(14.W))``."""
+        d = "Input" if self.dir == "in" else "Output"
         if self.type == "bool":
-            t = "Bool"
-            return f"{'Input' if self.dir == 'in' else 'Output'}(Bool())"
-        return f"{'Input' if self.dir == 'in' else 'Output'}({t}({self.total_width}.W))"
+            return f"{d}(Bool())"
+        t = "SInt" if self.type == "sint" and self.elems == 1 else "UInt"
+        return f"{d}({t}({self.total_width}.W))"
 
-    def describe(self) -> str:
+    def scala_decl(self, pad: int = 0) -> str:
+        """Dichiarazione Scala valida dentro un Bundle: ``val x = Input(SInt(14.W))``.
+
+        ``pad`` allinea gli ``=`` di un blocco di porte.
+        """
+        return f"val {self.name.ljust(pad)} = {self.chisel_type()}"
+
+    def doc_text(self) -> str:
+        """Semantica della porta su una riga (va nel commento ``//``), senza nome né tipo."""
         what = {"e2m1": "FP4 E2M1 code", "e8m0": "E8M0 scale code", "e4m3": "FP8 E4M3 code",
                 "fp32": "IEEE-754 binary32 bit pattern", "bf16": "bfloat16 bit pattern",
                 "uint": "unsigned integer", "sint": "two's complement signed integer",
@@ -75,7 +84,8 @@ class Port(BaseModel):
         vec = (f", vector of {self.elems} x {self.elem_width}-bit elements packed "
                f"(element i at bits [{self.elem_width}*i+{self.elem_width - 1}:{self.elem_width}*i])"
                if self.elems > 1 else "")
-        return f"{self.name}: {self.chisel_type()} -- {what}{vec}" + (f". {self.doc}" if self.doc else "")
+        text = what + vec + (f". {self.doc}" if self.doc else "")
+        return " ".join(text.split())  # una sola riga: il commento // non va spezzato
 
 
 class Timing(BaseModel):
@@ -149,16 +159,43 @@ class Task(BaseModel):
     def numerics_obj(self) -> Numerics:
         return Numerics.from_dict(self.numerics)
 
-    def interface_text(self) -> str:
-        kind = ("purely combinational (use RawModule or ignore clock/reset)"
-                if self.timing.kind == "comb" else
-                f"pipelined Module with fixed latency {self.timing.latency} cycle(s): the output "
-                f"for an input applied in cycle t must appear in cycle t+{self.timing.latency}; a new "
-                "input is accepted every cycle")
-        lines = [f"Top module: class {self.top}, {kind}.",
-                 "Ports (declare them with FlatIO so Verilog names match exactly):"]
-        lines += [f"  - {p.describe()}" for p in self.ports]
-        return "\n".join(lines)
+    def flatio_block(self, indent: str = "") -> str:
+        """Dichiarazione ``val io = FlatIO(new Bundle {...})`` compilabile così com'è.
+
+        La semantica di ogni porta sta in un commento ``//`` allineato: nessuna riga
+        usa la notazione ``nome: Input(...)``, che il modello tende a copiare nel
+        Bundle (``val x: Input(...)`` non è Scala valido).
+        """
+        pad = max(len(p.name) for p in self.ports)
+        decls = [p.scala_decl(pad) for p in self.ports]
+        width = max(len(d) for d in decls)
+        body = [f"{indent}  {d.ljust(width)}  // {p.doc_text()}" for d, p in zip(decls, self.ports)]
+        return "\n".join([f"{indent}val io = FlatIO(new Bundle {{", *body, f"{indent}}})"])
+
+    def interface_text(self, submodule: bool = False) -> str:
+        """Interfaccia per i prompt.
+
+        ``submodule=False``: modulo da scrivere, con il blocco FlatIO da copiare.
+        ``submodule=True``: sottomodulo già verificato da istanziare (integrate): il
+        blocco mostra i campi di ``io`` ma il modello non deve ridichiararli.
+        """
+        if self.timing.kind == "comb":
+            kind = ("purely combinational RawModule" if submodule
+                    else "purely combinational (extend RawModule)")
+        else:
+            kind = (f"pipelined Module with fixed latency {self.timing.latency} cycle(s): the "
+                    f"output for an input applied in cycle t must appear in cycle "
+                    f"t+{self.timing.latency}; a new input is accepted every cycle")
+        if submodule:
+            return "\n".join([
+                f"Submodule: class {self.top}, {kind}. Its ports are already declared inside the "
+                f"verified class as shown below: do NOT redeclare them; instantiate it with "
+                f"Module(new {self.top}) and connect <instance>.io.<port>.",
+                "", self.flatio_block("    ")])
+        return "\n".join([
+            f"Top module: class {self.top}, {kind}.",
+            "Declare the ports exactly like this (copy verbatim; FlatIO keeps the Verilog names):",
+            "", self.flatio_block("    ")])
 
 
 def load_task(path: str | Path) -> Task:

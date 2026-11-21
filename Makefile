@@ -10,7 +10,7 @@ test:             ## test del framework e del golden model
 	$(PY) -m pytest -q
 
 test-fast:
-	$(PY) -m pytest -q -k "not all_scale_pairs"
+	$(PY) -m pytest -q -k "not all_scale_pairs" -m "not integration"
 
 doctor:
 	mxagent doctor
