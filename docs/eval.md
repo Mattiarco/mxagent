@@ -166,6 +166,39 @@ La campagna principale ha 910 job:
   distinti dai fallimenti del modello. Il report li elenca e li esclude dai tassi.
   Se la run ha lasciato `result.json` (es. `interrupted` per SIGHUP), il suo
   stato è riportato in `result_status`.
+- **Errori di sistema durante la verifica** ([infra.py](../mxagent/verify/infra.py),
+  unico elenco di pattern): "unable to create native thread", "Resource temporarily
+  unavailable" / Errno 11 / EAGAIN, "Cannot allocate memory", `OutOfMemoryError` e
+  altri errori fatali della JVM, "Too many open files", "No space left on device",
+  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Non sono
+  errori del candidato:
+  - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
+    60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;
+    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`;
+  - il feedback non arriva mai al modello e non consuma iterazioni, reflect, dedup
+    né anti-loop: dal punto di vista del ciclo la verifica non è mai avvenuta;
+  - se l'errore persiste la run si ferma con `status: "error"`, `reason: "infra:
+    ..."` (report `stage: "infra"`), senza `metrics.json`: il runner la registra come
+    `error`, il report la mette fra gli errori di infrastruttura (esclusi dai tassi)
+    e `--retry-errors` la riesegue. Lo stesso per ogni `OSError` non gestito (es.
+    `BlockingIOError` al fork). Identico in `baseline-a`, `baseline-b`,
+    `baseline-b-matched` e `full` (tutti passano da `Verifier.verify`).
+  - Eccezione: nello stadio PPA, dopo il pass, un errore di sistema ferma solo
+    l'ottimizzazione (`ppa_error`); il pass resta valido.
+  - Un `OutOfMemoryError: Java heap space` causato da un design enorme sarebbe
+    deterministico: dopo i tentativi la run finisce in `error`, non in `failed`.
+- **Processi:** ogni comando esterno parte in un process group proprio; su timeout,
+  interruzione (Ctrl-C, SIGTERM, SIGHUP) e a comando finito il gruppo riceve
+  SIGTERM e poi SIGKILL (salvo il server di `sbt --client`, chiuso a fine run). A
+  fine run e a fine job vengono terminate le JVM con la directory di lavoro nella
+  cartella della run (`jvm_killed` nel trace e in `index.jsonl`).
+- **Controllo delle risorse:** `mxagent eval` controlla prima di partire il limite
+  sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto a parallel x
+  picco stimato per job (2·cpu+60 thread del server sbt, cpu+30 del client,
+  firtool, cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux, sintesi), e la
+  presenza di JVM di sbt orfane; se non basta si ferma con il motivo (`--force` per
+  partire comunque). Diagnosi: `scripts/check_resources.sh` oppure `mxagent doctor
+  --resources --parallel N [--kill-orphans]`. Il dry-run mostra parallel e la stima.
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.

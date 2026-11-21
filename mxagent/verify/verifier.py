@@ -5,6 +5,13 @@
 
 Restituisce un :class:`VerifyReport` serializzabile, con il feedback testuale
 già compresso per il Reflector e un punteggio per ordinare i candidati.
+
+Errori di sistema (:mod:`.infra`: thread o processi esauriti, EAGAIN, memoria,
+disco) in qualunque stadio non diventano errori del candidato: la verifica dello
+stesso candidato viene ripetuta (backoff ``infra_backoff``, di default 10/30/60 s)
+dopo aver terminato i processi rimasti; se l'errore persiste si solleva
+:class:`~.infra.InfraError` con un report ``stage = "infra"``. Il chiamante non
+vede mai quel report come feedback.
 """
 from __future__ import annotations
 
@@ -17,7 +24,9 @@ from pathlib import Path
 
 from ..bench.kernels import get_kernel
 from ..bench.task import Task
+from ..util import procs
 from . import chisel, lint
+from .infra import InfraError, classify, classify_exc
 from .ddmin import complexity, minimize
 from .feedback import SimSummary, compare, patterns, pick_representatives, table_rows
 from .sim import Simulator
@@ -41,10 +50,15 @@ class VerifyReport:
     seconds: dict[str, float] = field(default_factory=dict)
     verilog: list[str] = field(default_factory=list)
     error_keys: list[str] = field(default_factory=list)  # firme per l'anti-loop
+    #: errore di sistema (stage "infra") e tentativi ripetuti per errori di sistema
+    infra: str = ""
+    infra_retries: list[dict] = field(default_factory=list)
 
     @property
     def score(self) -> tuple[int, float]:
         """Ordinamento dei candidati: stadio raggiunto, poi frazione di vettori ok."""
+        if self.stage == "infra":  # non è un esito del candidato: sotto ogni altro
+            return -1, 0.0
         return STAGES.index(self.stage), float(self.sim.get("pass_rate", 0.0))
 
     def to_dict(self) -> dict:
@@ -60,7 +74,8 @@ class Verifier:
     def __init__(self, task: Task, work_dir: Path, *, sbt_mode: str = "batch",
                  random_vectors: int = 2000, seed: int = 0, max_examples: int = 3,
                  sim_timeout: float = 900, ddmin_rounds: int = 8, max_vectors: int = 200_000,
-                 sbt_workspace: Path | None = None):
+                 sbt_workspace: Path | None = None,
+                 infra_backoff: tuple[float, ...] = (10, 30, 60)):
         self.task = task
         self.work = Path(work_dir)
         # workspace sbt condivisibile fra più Verifier della stessa run (un solo server JVM)
@@ -72,6 +87,8 @@ class Verifier:
         self.sim_timeout = sim_timeout
         self.ddmin_rounds = ddmin_rounds
         self.max_vectors = max_vectors
+        #: attese prima di ogni nuovo tentativo dopo un errore di sistema (len = tentativi in più)
+        self.infra_backoff = tuple(infra_backoff)
         self.kernel = get_kernel(task.golden)
         self.num = task.numerics_obj
         self._vecs: list[tuple[str, Vec]] | None = None
@@ -112,6 +129,48 @@ class Verifier:
 
     # ------------------------------------------------------------- verifica
     def verify(self, sources: dict[str, str], tag: str) -> VerifyReport:
+        """Verifica il candidato; ripete gli errori di sistema, poi :class:`InfraError`."""
+        retries: list[dict] = []
+        detail = where = ""
+        job = self.work / re.sub(r"\W", "_", tag)
+        for attempt in range(len(self.infra_backoff) + 1):
+            try:
+                rep = self._verify_once(sources, tag)
+            except _InfraHit as h:
+                detail, where = h.detail, h.where
+            except OSError as e:  # file, fork, rete dentro il verifier stesso
+                detail, where = classify_exc(e) or f"oserror: {e}", "verifier"
+            else:
+                if retries:
+                    rep.infra_retries = retries
+                    job.mkdir(parents=True, exist_ok=True)
+                    rep.save(job / "report.json")
+                return rep
+            retries.append({"attempt": attempt + 1, "where": where, "detail": detail})
+            self.kill_leftovers()
+            if attempt < len(self.infra_backoff):
+                time.sleep(self.infra_backoff[attempt])
+        rep = VerifyReport(tag, self.task.name, "infra", False, infra=detail, infra_retries=retries,
+                           error_keys=[f"infra:{detail[:120]}"])
+        job.mkdir(parents=True, exist_ok=True)
+        rep.save(job / "report.json")
+        raise InfraError(detail, where, rep, attempts=len(retries))
+
+    def _infra(self, text: str | None, where: str) -> None:
+        """Errore di sistema nel log di uno stadio fallito: interrompe il tentativo."""
+        hit = classify(text)
+        if hit:
+            raise _InfraHit(hit, where)
+
+    def kill_leftovers(self) -> list[int]:
+        """Dopo un errore di sistema o a fine run: server sbt del workspace (shutdown,
+        poi SIGTERM/SIGKILL alle JVM con cwd nel workspace)."""
+        if self.sbt_mode == "client" and self.sbt_ws.is_dir():
+            from ..util.shell import run as _run
+            _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
+        return procs.kill_pids([p.pid for p in procs.java_under(self.sbt_ws)])
+
+    def _verify_once(self, sources: dict[str, str], tag: str) -> VerifyReport:
         t0 = time.monotonic()
         safe = re.sub(r"\W", "_", tag)
         pkg = f"cand_{safe}"
@@ -126,6 +185,7 @@ class Verifier:
         (job / "elaborate.log").write_text(el.log, encoding="utf-8")
         rep.compile, rep.seconds["compile"] = el.to_dict(), round(el.seconds, 2)
         if not el.ok:
+            self._infra(el.log + "\n" + "\n".join(e.message for e in el.errors), "compile")
             rep.error_keys = [e.key() for e in el.errors]
             rep.feedback = "COMPILATION FAILED:\n" + "\n".join(e.render() for e in el.errors[:5])
             rep.feedback_raw = raw_build_log(el.log)
@@ -138,6 +198,8 @@ class Verifier:
         (job / "lint.log").write_text(li.log, encoding="utf-8")
         rep.lint, rep.seconds["lint"] = li.to_dict(), round(li.seconds, 2)
         hard = [i for i in li.issues if i.severity == "error"]
+        if hard or not li.ok:
+            self._infra(li.log + "\n" + "\n".join(i.message for i in li.issues), "lint")
         if hard:
             rep.error_keys = [f"lint:{i.code}:{i.message[:80]}" for i in hard]
             rep.feedback = "VERILATOR LINT ERRORS:\n" + "\n".join(i.render() for i in hard[:8])
@@ -159,6 +221,7 @@ class Verifier:
         rep.seconds["sim"] = round(run.seconds, 2)
         (job / "sim.log").write_text(run.log, encoding="utf-8")
         if not run.ok:
+            self._infra(run.log + "\n" + run.error, "sim")
             rep.error_keys = [f"sim:{run.error}"]
             rep.sim = {"error": run.error, "pass_rate": 0.0}
             rep.feedback = f"SIMULATION ERROR: {run.error}\n" + _tail(run.log, 25)
@@ -204,6 +267,7 @@ class Verifier:
         def still_fails(cands: list[Vec]) -> list[bool]:
             r = sv.run(self._rows(cands))
             if not r.ok:
+                self._infra(r.log + "\n" + r.error, "ddmin")
                 return [False] * len(cands)
             return [row is None or dict(zip(outs, row)) != self.golden(c)
                     for c, row in zip(cands, r.outputs)]
@@ -221,11 +285,9 @@ class Verifier:
         return out, total
 
     def close(self) -> None:
-        """Chiude il server sbt (solo modalità client)."""
-        ws = self.sbt_ws
-        if self.sbt_mode == "client" and ws.is_dir():
-            from ..util.shell import run as _run
-            _run(chisel.sbt_cmd("client", "shutdown"), cwd=ws, timeout=60)
+        """Chiude il server sbt (modalità client) e termina ogni JVM rimasta nel
+        workspace: un server bloccato non risponde a ``shutdown``."""
+        self.kill_leftovers()
 
     def __enter__(self) -> "Verifier":
         return self
@@ -237,6 +299,14 @@ class Verifier:
         rep.seconds["total"] = round(time.monotonic() - t0, 2)
         rep.save(job / "report.json")
         return rep
+
+
+class _InfraHit(Exception):
+    """Errore di sistema trovato in uno stadio (interno: lo gestisce ``Verifier.verify``)."""
+
+    def __init__(self, detail: str, where: str):
+        super().__init__(detail)
+        self.detail, self.where = detail, where
 
 
 def raw_build_log(log: str, n: int = 40) -> str:

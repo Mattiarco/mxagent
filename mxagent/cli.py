@@ -60,6 +60,27 @@ def cmd_doctor(a: argparse.Namespace) -> int:
     from .doctor import format_checks, run_checks
 
     cfg = load_config(a.config)
+    if a.resources:
+        from .util import procs
+        snap = procs.snapshot()
+        print(f"mxagent {__version__} - risorse del sistema (sim.sbt_mode = {cfg.sim.sbt_mode})\n")
+        print(procs.render_snapshot(snap))
+        errors, warns, est = procs.preflight(a.parallel, snap)
+        print(f"\nstima per parallel={a.parallel}: {a.parallel} x {est['per_job_tasks']} task per "
+              f"job + {est['reserved_tasks']} riservati = {est['need_tasks']}")
+        for w in warns:
+            print(f"AVVISO: {w}")
+        for e in errors:
+            print(f"PROBLEMA: {e}")
+        if a.kill_orphans and snap.orphans:
+            killed = procs.kill_pids([o.pid for o in snap.orphans])
+            print(f"JVM orfane terminate: {killed}")
+            errors = [e for e in errors if "orfane" not in e]
+        if not errors and any("non disponibile" in w for w in warns):
+            print("controllo non eseguito su questo sistema")
+        elif not errors:
+            print("risorse ok per la campagna")
+        return 1 if errors else 0
     if a.synth:
         from .doctor import synth_backends
         print(f"mxagent {__version__} - backend di sintesi (synth.backends = {cfg.synth.backends})\n")
@@ -170,12 +191,22 @@ def cmd_run(a: argparse.Namespace) -> int:
         raise SystemExit(str(e)) from None
     task = load_task(a.task)
     runs = Path(a.runs_dir or os.environ.get("MXAGENT_RUNS") or cfg.runs_dir)
-    if a.mode == "full":
-        from .agents.orchestrator import run_full
-        res = run_full(task, cfg, seed=a.seed, runs_dir=runs, run_id=a.run_id)
-    else:
-        res = run_loop(task, cfg, a.mode, seed=a.seed, role=cfg.llm.roles["coder"], runs_dir=runs,
-                       run_id=a.run_id)
+    from .verify.infra import infra_outcome
+    try:
+        if a.mode == "full":
+            from .agents.orchestrator import run_full
+            res = run_full(task, cfg, seed=a.seed, runs_dir=runs, run_id=a.run_id)
+        else:
+            res = run_loop(task, cfg, a.mode, seed=a.seed, role=cfg.llm.roles["coder"],
+                           runs_dir=runs, run_id=a.run_id)
+    except Exception as e:  # noqa: BLE001
+        out = infra_outcome(e)
+        if out is None:
+            raise
+        # errore di sistema: result.json dice status error / reason infra; niente metrics.json,
+        # quindi la campagna registra il job come error (rieseguibile con --retry-errors)
+        print(f"ERRORE DI SISTEMA (run non valutabile): {out['reason']}", file=sys.stderr)
+        return 3
     m = res.metrics
     print(json.dumps({k: m[k] for k in ("task", "mode", "model", "seed", "passed", "stop",
                                         "iterations", "best_stage", "best_pass_rate", "solution",
@@ -309,9 +340,11 @@ def flag_campaign(a: argparse.Namespace, name: str):
         "llm_cache": a.llm_cache or "shared"})
 
 
-def describe_campaign(c, r, todo: list) -> str:
-    """Testo del dry-run: job in ordine, budget e stima del tempo (limite superiore)."""
+def describe_campaign(c, r, todo: list, parallel: int = 1) -> str:
+    """Testo del dry-run: job in ordine, budget, parallel, stima del tempo (limite
+    superiore) e dei processi/thread di picco."""
     from .eval.campaign import jobs
+    from .util import procs
 
     cfg = r.base_config()
     b, s = cfg.budget, cfg.synth
@@ -331,7 +364,17 @@ def describe_campaign(c, r, todo: list) -> str:
                           "campaign": f"della campagna ({(r.out / 'llm_cache').as_posix()})",
                           "off": "nessuna (ogni chiamata va al modello)"}[c.llm_cache],
          "warm-up dei modelli a ogni cambio di profilo (fuori dal conteggio): "
-         + ("sì" if c.warmup else "no"), "", "ordine di esecuzione:"]
+         + ("sì" if c.warmup else "no")]
+    snap = procs.snapshot()
+    _, _, est = procs.preflight(parallel, snap)
+    lim = est["pids_limit"]
+    L += [f"parallel: {parallel} job insieme",
+          f"picco stimato di processi+thread: {parallel} x {est['per_job_tasks']} per job "
+          f"(JVM sbt server+client, firtool, Verilator/g++ con {est['ncpu']} cpu) + "
+          f"{est['reserved_tasks']} riservati (Ollama, tmux, sintesi) = {est['need_tasks']}; "
+          + (f"limite attuale {lim}, in uso {est['pids_used']}" if lim is not None
+             else "limite attuale non leggibile qui (serve /proc)"),
+          "", "ordine di esecuzione:"]
     done = {j.id for j in js} - {j.id for j in todo}
     for i, j in enumerate(js, 1):
         L.append(f"  {i:2d}. {j.task:22s} {j.mode:11s} {j.models:8s} s{j.seed}"
@@ -371,9 +414,28 @@ def cmd_eval(a: argparse.Namespace) -> int:
         c = flag_campaign(a, out.name)
     r = Runner(c, out)
     if a.dry_run:
-        print(describe_campaign(c, r, r.pending(a.retry_errors)))
+        print(describe_campaign(c, r, r.pending(a.retry_errors), a.parallel))
         return 0
-    r.run(parallel=a.parallel, retry_errors=a.retry_errors, limit=a.limit)
+    from .util import procs
+    errors, warns, est = procs.preflight(a.parallel)
+    for w in warns:
+        print(f"AVVISO risorse: {w}", file=sys.stderr)
+    if errors:
+        msg = "\n".join(f"- {e}" for e in errors)
+        if not a.force:
+            raise SystemExit(f"controllo delle risorse fallito, campagna non avviata:\n{msg}\n"
+                             "Diagnosi: scripts/check_resources.sh o mxagent doctor --resources. "
+                             "Per partire comunque: --force.")
+        print(f"AVVISO: controllo delle risorse fallito, si parte per --force:\n{msg}",
+              file=sys.stderr)
+    from .run.result import interruptible
+    from .util.shell import kill_active
+    with interruptible():  # SIGTERM/SIGHUP come Ctrl-C: i job in corso vengono terminati
+        try:
+            r.run(parallel=a.parallel, retry_errors=a.retry_errors, limit=a.limit)
+        except BaseException:
+            kill_active(grace=120)  # i job sono in sessioni proprie: non ricevono il segnale
+            raise
     S = write_report(out)
     print(f"report: {out / 'summary.md'}  (job: {S['jobs']})")
     return 0
@@ -407,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--warmup", action="store_true", help="elabora un modulo di prova (popola le cache)")
     d.add_argument("--skip-llm", action="store_true", help="non controllare Ollama (solo toolchain HW)")
     d.add_argument("--synth", action="store_true", help="elenca i backend di sintesi disponibili/mancanti")
+    d.add_argument("--resources", action="store_true",
+                   help="limiti di processi/thread, cgroup, memoria, JVM vive e orfane; stima per --parallel")
+    d.add_argument("--parallel", type=int, default=1, help="con --resources: job in parallelo previsti")
+    d.add_argument("--kill-orphans", action="store_true",
+                   help="con --resources: termina le JVM di sbt orfane (SIGTERM, poi SIGKILL)")
     d.set_defaults(func=cmd_doctor)
 
     gp = sub.add_parser("golden", help="interroga il golden model")
@@ -515,6 +582,9 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--retry-errors", action="store_true", help="rifà i job finiti in errore/timeout")
     ep.add_argument("--limit", type=int, default=None, help="esegue al più N job (prove)")
     ep.add_argument("--dry-run", action="store_true", help="elenca i job senza eseguirli")
+    ep.add_argument("--force", action="store_true",
+                    help="parte anche se il controllo delle risorse fallisce (ulimit/pids.max bassi "
+                         "per --parallel, JVM orfane)")
     ep.set_defaults(func=cmd_eval)
 
     pp = sub.add_parser("report", help="report di una campagna (anche incompleta)")

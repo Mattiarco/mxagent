@@ -258,7 +258,8 @@ class ModuleSolver:
         ctx.rec.event("verify", module=self.task.top, n=n, origin=origin, stage=rep.stage,
                       passed=rep.passed, score=list(rep.score), sanitized=fixes,
                       error_keys=rep.error_keys, feedback=rep.feedback[:3000],
-                      seconds=rep.seconds)
+                      seconds=rep.seconds,
+                      **({"infra_retries": rep.infra_retries} if rep.infra_retries else {}))
         self.memory.append(self._summary(a, n))
         return a
 

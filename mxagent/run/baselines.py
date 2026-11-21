@@ -38,6 +38,8 @@ from ..agents.solver import log_llm_call
 from ..bench.task import Task
 from ..config import Config, ModelRole, profile_label
 from ..llm.chat import Budget, BudgetExceeded, ChatModel, describe_llm, make_chat, model_digest
+from ..util import procs
+from ..verify.infra import infra_outcome
 from ..verify.verifier import VerifyReport, Verifier
 from . import best as _best
 from .cleanup import clean_run
@@ -218,7 +220,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                             "n_vectors": (rep.sim or {}).get("total")})
                         rec.event("verify", iter=it, stage=rep.stage, passed=rep.passed,
                                   score=list(rep.score), seconds=rep.seconds, feedback=rep.feedback,
-                                  error_keys=rep.error_keys)
+                                  error_keys=rep.error_keys,
+                                  **({"infra_retries": rep.infra_retries} if rep.infra_retries
+                                     else {}))
                         if prev_keys is not None and rep.error_keys and rep.error_keys == prev_keys:
                             repeated += 1
                         prev_keys = rep.error_keys
@@ -264,12 +268,22 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             outcome = {"status": "interrupted", "reason": f"signal {e.signame}"}
             raise
         except BaseException as e:
-            outcome = {"status": "failed", "reason": "exception",
-                       "error": f"{type(e).__name__}: {e}"[:500]}
+            # errore di sistema (verifica ripetuta invano, OSError): run non valutabile,
+            # stesso esito del sistema completo
+            outcome = (infra_outcome(e) if isinstance(e, Exception) else None) or {
+                "status": "failed", "reason": "exception", "error": f"{type(e).__name__}: {e}"[:500]}
+            if outcome["status"] == "error":
+                rec.event("infra_error", reason=outcome["reason"], error=outcome["error"])
             raise
         finally:
             if own_verifier and verifier is not None:
                 verifier.close()
+            try:  # nessuna JVM resta viva nella cartella della run
+                killed = procs.kill_pids([p.pid for p in procs.java_under(rec.root)])
+                if killed:
+                    rec.event("jvm_killed", pids=killed)
+            except Exception as e:  # noqa: BLE001
+                rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
             if not cfg.runs.keep_build_artifacts:
                 try:
                     rec.event("cleanup", **clean_run(rec.root))

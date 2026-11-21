@@ -38,6 +38,8 @@ from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
 from ..verify import chisel
+from ..util import procs
+from ..verify.infra import infra_outcome
 from ..verify.verifier import Verifier
 from . import prompts
 from .ppa import PPAOptimizer
@@ -383,16 +385,32 @@ class Orchestrator:
                 self._state("INTERRUPTED", signal=e.signame)
                 raise
             except BaseException as e:
-                self._outcome = {"status": "failed", "reason": "exception",
-                                 "error": f"{type(e).__name__}: {e}"[:500]}
-                self._state("FAILED", reason="exception", error=self._outcome["error"])
+                infra = infra_outcome(e) if isinstance(e, Exception) else None
+                if infra:  # errore di sistema (verifica ripetuta invano, OSError): run non valutabile
+                    self._outcome = infra
+                    self._state("INFRA_ERROR", reason=infra["reason"], error=infra["error"])
+                else:
+                    self._outcome = {"status": "failed", "reason": "exception",
+                                     "error": f"{type(e).__name__}: {e}"[:500]}
+                    self._state("FAILED", reason="exception", error=self._outcome["error"])
                 raise
             finally:
                 if self._best_info is None and self._outcome.get("status") != "interrupted":
                     self._t_end = self._t_end or time.monotonic()
                     self._best_safe(False, synth=False)  # run finita per eccezione
+                self._kill_jvms()
                 self._cleanup()
                 self._write_result(t0)
+
+    def _kill_jvms(self) -> None:
+        """A fine run nessuna JVM resta viva nella cartella della run (server sbt del
+        workspace che non ha risposto a shutdown, JVM di verifiche interrotte)."""
+        try:
+            killed = procs.kill_pids([p.pid for p in procs.java_under(self.rec.root)])
+            if killed:
+                self.rec.event("jvm_killed", pids=killed)
+        except Exception as e:  # noqa: BLE001 - la pulizia non deve far fallire la run
+            self.rec.event("cleanup_error", error=f"{type(e).__name__}: {e}")
 
     def _cleanup(self) -> None:
         if self.cfg.runs.keep_build_artifacts:

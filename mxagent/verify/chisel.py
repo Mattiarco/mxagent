@@ -245,8 +245,11 @@ def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch"
     out_dir.mkdir(parents=True)
     target = os.path.relpath(out_dir, work).replace("\\", "/") if _same_drive(out_dir, work) else str(out_dir)
     cmd = f"runMain mxagent.Elaborate {pkg}.{top} {target}"
+    # client: il server sbt (JVM persistente) deve sopravvivere al comando; lo chiude
+    # Verifier.close. batch: a fine comando nessun processo del gruppo resta vivo.
     r: Result = run(sbt_cmd(mode, cmd), cwd=work, timeout=timeout,
-                    env={"SBT_OPTS": os.environ.get("SBT_OPTS", "-Xss8m"), "NO_COLOR": "1"})
+                    env={"SBT_OPTS": os.environ.get("SBT_OPTS", "-Xss8m"), "NO_COLOR": "1"},
+                    keep_group=mode == "client")
     log = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.log)
     src_dir = work / "src" / "main" / "scala" / pkg
     verilog = sorted([*out_dir.rglob("*.sv"), *out_dir.rglob("*.v")])
