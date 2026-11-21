@@ -128,17 +128,34 @@ La campagna principale ha 910 job:
   - le risposte sono in cache (`llm.cache_dir`, default `.cache/llm`), con chiave
     richiesta completa + seed + digest del modello. Rieseguire un job già eseguito
     (anche in un'altra campagna sulla stessa macchina) riprende le risposte: la run
-    dura secondi e **non è un risultato nuovo**. `result.json` registra
-    `llm_cached_calls`, `llm_cached_fraction` e `replayed` (vero se *tutte* le
-    chiamate della run vengono dalla cache). Il report esclude le run replayed dai
+    dura secondi e **non è un risultato nuovo**. Ogni voce di cache registra la
+    cartella della run che ha ottenuto la risposta (`origin`) e l'evento `llm` di una
+    risposta letta dalla cache la riporta in `cache_origin`: da quale run viene ogni
+    risposta è verificabile nel trace. `result.json` registra `llm_cached_calls`,
+    `llm_cached_expected`, `llm_cached_fraction` e `replayed`: vero se *tutte* le
+    chiamate vengono dalla cache **e** almeno una da una run diversa da quelle attese.
+    Attese sono la run stessa (un tentativo precedente dello stesso job, es. dopo un
+    errore di sistema) e, per `baseline-b-matched`, la `baseline-b` appaiata della
+    stessa campagna (stessi task, seed e modelli): matched usa gli stessi prompt e
+    seed di B, quindi le sue prime 1 + `max_fix_iters` richieste coincidono per
+    costruzione con quelle di B e le riprende dalla cache. Una matched che passa
+    entro quelle chiamate ha tutte le risposte dalla B appaiata e **non** è replayed:
+    resta nei totali e nella curva per k. Il confronto delle provenienze usa
+    campagna/runs/job (regge lo spostamento della cartella, non confonde due
+    campagne con gli stessi id di job); le voci di cache scritte prima del campo
+    `origin` contano come estranee, quindi una run tutta dalla cache di una campagna
+    precedente resta replayed. Il report ricalcola il campo dal trace con la stessa
+    funzione della run. Il report esclude le run replayed dai
     tassi principali, le elenca in una sezione a parte e avvisa (su stderr e in
     testa a `report.md`/`summary.md`) senza fallire. Le run con solo una parte
     delle chiamate in cache restano nei totali e sono elencate con la frazione;
   - per rieseguire senza cache: `mxagent run --no-llm-cache` (equivale a
     `--set llm.cache_dir=null`), oppure nella campagna `llm_cache: off` o
     `mxagent eval --llm-cache off`. Con `llm_cache: campaign` la cache è
-    `<campagna>/llm_cache`: campagne diverse non condividono risposte. Il default
-    `shared` è il comportamento di prima. La cache esistente non viene cancellata;
+    `<campagna>/llm_cache`: campagne diverse non condividono risposte; è
+    l'impostazione di [main.yaml](../configs/eval/main.yaml) e
+    [b04_b05.yaml](../configs/eval/b04_b05.yaml). Il default `shared` è il
+    comportamento di prima. La cache esistente non viene cancellata;
   - `meta.json` di ogni run registra il digest del modello, l'hash dei prompt e
     le versioni degli strumenti;
   - `campaign.json` registra la campagna e il suo hash.

@@ -19,6 +19,7 @@ import threading
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from .recorder import Recorder
@@ -103,17 +104,47 @@ def llm_calls_to_pass(events: list[dict], top: str | None = None) -> int | None:
     return None
 
 
-#: una run è "replayed" se TUTTE le sue chiamate al modello vengono dalla cache LLM
-#: (``llm.cache_dir``): nessuna risposta nuova, il risultato ripete un'esecuzione
-#: precedente. Le run con una parte delle chiamate in cache (frazione in
-#: ``llm_cached_fraction``) non sono replayed: il report le elenca a parte.
-def llm_cache_fields(events: list[dict]) -> dict[str, Any]:
-    """``llm_cached_calls``, ``llm_cached_fraction`` e ``replayed`` dagli eventi ``llm``."""
+MATCHED, PAIRED = "__baseline-b-matched__", "__baseline-b__"
+
+
+def expected_cache_origins(run_dir: Path | str) -> list[Path]:
+    """Run da cui una risposta in cache è ATTESA e non rende la run replayed: la run
+    stessa (un tentativo precedente dello stesso job, es. dopo un errore di sistema) e,
+    per un job ``baseline-b-matched`` di una campagna, la ``baseline-b`` appaiata (stesso
+    task, seed e modelli, stessa campagna): matched ne ripete per costruzione le prime
+    1 + max_fix_iters richieste."""
+    d = Path(run_dir)
+    out = [d]
+    if MATCHED in d.name:
+        out.append(d.with_name(d.name.replace(MATCHED, PAIRED)))
+    return out
+
+
+def same_run(origin: str | None, run_dir: Path) -> bool:
+    """La provenienza ``origin`` (cartella assoluta registrata in cache) è ``run_dir``?
+    Si confrontano campagna/runs/job (ultime tre componenti): regge lo spostamento
+    della cartella della campagna, non confonde campagne diverse."""
+    if not origin:
+        return False
+    a = [x for x in str(origin).replace("\\", "/").split("/") if x][-3:]
+    b = [x for x in str(run_dir).replace("\\", "/").split("/") if x][-3:]
+    return a == b
+
+
+#: una run è "replayed" se TUTTE le sue chiamate al modello vengono dalla cache LLM e
+#: almeno una viene da una run diversa da quelle attese (:func:`expected_cache_origins`):
+#: il risultato ripete un'esecuzione precedente. Le risposte senza provenienza (voci di
+#: cache scritte prima del campo ``origin``) contano come estranee. Le run con una parte
+#: delle chiamate nuove non sono replayed (``llm_cached_fraction``, elencate a parte).
+def llm_cache_fields(events: list[dict], expected: list[Path] | None = None) -> dict[str, Any]:
+    """``llm_cached_calls``, ``llm_cached_expected``, ``llm_cached_fraction`` e
+    ``replayed`` dagli eventi ``llm`` (``cache_origin`` = run che aveva la risposta)."""
     calls = [e for e in events if e.get("kind") == "llm"]
-    cached = sum(bool(e.get("cached")) for e in calls)
-    return {"llm_cached_calls": cached,
-            "llm_cached_fraction": round(cached / len(calls), 4) if calls else None,
-            "replayed": bool(calls) and cached == len(calls)}
+    cached = [e for e in calls if e.get("cached")]
+    exp = [e for e in cached if any(same_run(e.get("cache_origin"), d) for d in expected or [])]
+    return {"llm_cached_calls": len(cached), "llm_cached_expected": len(exp),
+            "llm_cached_fraction": round(len(cached) / len(calls), 4) if calls else None,
+            "replayed": bool(calls) and len(cached) == len(calls) and len(exp) < len(cached)}
 
 
 def llm_result_fields(llm: Any, bud: dict) -> dict[str, Any]:

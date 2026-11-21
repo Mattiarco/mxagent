@@ -45,7 +45,8 @@ from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     llm_cache_fields, llm_calls_to_pass, llm_result_fields, write_result)
+                     expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
+                     llm_result_fields, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b", "baseline-b-matched")
@@ -116,6 +117,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     elif getattr(llm, "budget", None) is None:
         llm.budget = budget  # type: ignore[attr-defined]
     budget = getattr(llm, "budget", None) or budget
+    if hasattr(llm, "origin"):  # provenienza delle risposte che questa run mette in cache
+        llm.origin = str(rec.root.resolve())
     digest = model_digest(llm, role.model)
     rec.meta(task=task.name, mode=mode, seed=seed, model=role.model, model_profile=profile,
              models_by_role=models_by_role, model_digest=digest,
@@ -174,7 +177,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "solution": (best_info or {}).get("solution", "none"), "best": best_info,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
-                **llm_cache_fields(rec.events),
+                **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
                 "history_truncations": truncations, "history_truncated_calls": truncated_calls,
                 "max_fix_iters": st.max_fix_iters,
                 "duplicates": 0, "ppa": None})
@@ -260,7 +263,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "history_truncated_calls": truncated_calls, "max_fix_iters": st.max_fix_iters,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
-                "llm": budget.to_dict(), **llm_cache_fields(rec.events),
+                "llm": budget.to_dict(),
+                **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
             }
             rec.write_json("metrics.json", metrics)
             return RunResult(rec.root, metrics, b, reports)

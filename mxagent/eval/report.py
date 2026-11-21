@@ -78,16 +78,20 @@ def calls_to_pass(rd: Path, res: dict, m: dict,
 
 
 def cache_info(rd: Path, res: dict) -> dict:
-    """``replayed``, ``llm_cached_calls``, ``llm_cached_fraction`` da result.json o, per
-    le run precedenti ai campi, dagli eventi ``llm`` di trace.json (stessa funzione)."""
-    from ..run.result import llm_cache_fields
+    """``replayed``, ``llm_cached_calls``, ``llm_cached_expected``, ``llm_cached_fraction``
+    ricalcolati dal trace (eventi ``llm`` con ``cache_origin``) con la stessa funzione della
+    run: per una ``baseline-b-matched`` le risposte della ``baseline-b`` appaiata della
+    stessa campagna sono attese. Senza trace: i campi di result.json."""
+    from ..run.result import expected_cache_origins, llm_cache_fields
 
-    if "replayed" in res:
-        return {k: res.get(k) for k in ("replayed", "llm_cached_calls", "llm_cached_fraction")}
     ev = _read(rd / "trace.json")
     if ev:
-        return llm_cache_fields(ev)
-    return {"replayed": False, "llm_cached_calls": None, "llm_cached_fraction": None}
+        return llm_cache_fields(ev, expected_cache_origins(rd))
+    if "replayed" in res:
+        return {k: res.get(k) for k in ("replayed", "llm_cached_calls", "llm_cached_expected",
+                                        "llm_cached_fraction")}
+    return {"replayed": False, "llm_cached_calls": None, "llm_cached_expected": None,
+            "llm_cached_fraction": None}
 
 
 #: motivi di ``report_exclude`` con un'etichetta per il titolo della sezione
@@ -290,7 +294,7 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict],
         "runs": [{**_ident(r), "llm_cached_calls": r.get("llm_cached_calls")} for r in rp]}
     S["partial_cache"] = [
         {**_ident(r), "llm_cached_calls": r.get("llm_cached_calls"),
-         "fraction": r.get("llm_cached_fraction")}
+         "expected": r.get("llm_cached_expected"), "fraction": r.get("llm_cached_fraction")}
         for r in recs_all if r["status"] == "done" and not r.get("replayed")
         and (r.get("llm_cached_calls") or 0) > 0]
 
@@ -675,11 +679,15 @@ def render(c: Campaign, S: dict) -> str:
                   f"| {r['llm_cached_calls']} |" for r in rp["runs"]]
             L.append("")
         if S.get("partial_cache"):
-            L += ["Run con una parte delle chiamate in cache (restano nei totali):", "",
-                  "| task | modalità | variante | modelli | seed | chiamate in cache | frazione |",
-                  "|---|---|---|---|---|---|---|"]
+            L += ["Run non replayed con chiamate in cache (restano nei totali): una parte delle "
+                  "chiamate è nuova, oppure le risposte in cache sono attese (per "
+                  "`baseline-b-matched` quelle della `baseline-b` appaiata della stessa "
+                  "campagna, di cui ripete le prime richieste):", "",
+                  "| task | modalità | variante | modelli | seed | chiamate in cache | di cui attese "
+                  "| frazione |", "|---|---|---|---|---|---|---|---|"]
             L += [f"| {r['task']} | {r['mode']} | {r['variant']} | {r['models']} | {r['seed']} "
-                  f"| {r['llm_cached_calls']} | {_f(r['fraction'], '{:.0%}')} |"
+                  f"| {r['llm_cached_calls']} | {_f(r.get('expected'), '{:.0f}')} "
+                  f"| {_f(r['fraction'], '{:.0%}')} |"
                   for r in S["partial_cache"]]
             L.append("")
 
@@ -700,7 +708,7 @@ CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "pas
               "fmax_min", "fmax_mhz", "adp", "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5",
               "tokens_total", "duplicates", "wrapper_passed", "solution", "best_tests_passed",
               "best_tests_total", "llm_timeouts", "llm_seconds", "cost_usd", "replayed",
-              "llm_cached_calls", "llm_cached_fraction"]
+              "llm_cached_calls", "llm_cached_expected", "llm_cached_fraction"]
 STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@3", "pass@5", "pass@10"]
 
 

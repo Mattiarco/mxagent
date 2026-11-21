@@ -97,15 +97,16 @@ def run_rows(out: Path, c: Campaign) -> list[dict]:
 
 
 def _cache(rd: Path, res: dict) -> dict:
-    """``replayed`` / ``llm_cached_calls`` da result.json o, per le run precedenti ai
-    campi, dagli eventi ``llm`` del trace."""
-    from ..run.result import llm_cache_fields
+    """``replayed`` / ``llm_cached_calls`` dal trace con la stessa regola di report.md
+    (risposte della baseline-b appaiata attese per baseline-b-matched); senza trace,
+    da result.json."""
+    from ..run.result import expected_cache_origins, llm_cache_fields
 
-    if "replayed" in res:
-        return {"replayed": res.get("replayed"), "llm_cached_calls": res.get("llm_cached_calls")}
     ev = _read(rd / "trace.json")
-    f = llm_cache_fields(ev) if ev else {"replayed": None, "llm_cached_calls": None}
-    return {"replayed": f["replayed"], "llm_cached_calls": f["llm_cached_calls"]}
+    if ev:
+        f = llm_cache_fields(ev, expected_cache_origins(rd))
+        return {"replayed": f["replayed"], "llm_cached_calls": f["llm_cached_calls"]}
+    return {"replayed": res.get("replayed"), "llm_cached_calls": res.get("llm_cached_calls")}
 
 
 def _med(xs) -> float | None:

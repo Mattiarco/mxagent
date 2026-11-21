@@ -38,7 +38,9 @@ def log_llm_call(rec: Recorder, resp, **data: Any) -> None:
               seconds=round(resp.seconds, 2), cached=resp.cached,
               outcome=resp.error or "ok", error=resp.error or None, attempts=resp.attempts,
               timeouts=len(resp.timeouts), done_reason=resp.done_reason,
-              cost_usd=resp.cost_usd, **({"notes": resp.notes} if resp.notes else {}))
+              cost_usd=resp.cost_usd, **({"notes": resp.notes} if resp.notes else {}),
+              # risposta dalla cache: run che l'aveva ottenuta (None = voce senza provenienza)
+              **({"cache_origin": getattr(resp, "origin", None)} if resp.cached else {}))
 
 
 @dataclass
