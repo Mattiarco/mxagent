@@ -1,0 +1,3 @@
+pulizia runs/verify/b02_e2m1_mul: 2.1 MB di build rimossi (0.0 MB restano)
+[b02_e2m1_mul] stage=pass passed=True score=(3, 1.0) tempi={'compile': 19.93, 'lint': 0.21, 'sim_build': 6.97, 'sim': 0.56, 'total': 27.67}
+ALL 256 TEST VECTORS PASS (bit-exact).

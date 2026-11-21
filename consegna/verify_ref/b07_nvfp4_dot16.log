@@ -1,0 +1,3 @@
+pulizia runs/verify/b07_nvfp4_dot16: 2.2 MB di build rimossi (0.3 MB restano)
+[b07_nvfp4_dot16] stage=pass passed=True score=(3, 1.0) tempi={'compile': 11.98, 'lint': 0.09, 'sim_build': 4.59, 'sim': 0.49, 'total': 17.4}
+ALL 4030 TEST VECTORS PASS (bit-exact).

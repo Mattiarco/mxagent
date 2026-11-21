@@ -1,0 +1,3 @@
+pulizia runs/verify/b03_e8m0_to_fp32: 2.1 MB di build rimossi (0.0 MB restano)
+[b03_e8m0_to_fp32] stage=pass passed=True score=(3, 1.0) tempi={'compile': 18.31, 'lint': 0.12, 'sim_build': 6.96, 'sim': 0.86, 'total': 26.25}
+ALL 256 TEST VECTORS PASS (bit-exact).

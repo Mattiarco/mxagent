@@ -1,0 +1,3 @@
+pulizia runs/verify/b06_mxfp4_dot32_pipe: 2.3 MB di build rimossi (0.5 MB restano)
+[b06_mxfp4_dot32_pipe] stage=pass passed=True score=(3, 1.0) tempi={'compile': 12.22, 'lint': 0.09, 'sim_build': 4.87, 'sim': 0.5, 'total': 18.13}
+ALL 4035 TEST VECTORS PASS (bit-exact).

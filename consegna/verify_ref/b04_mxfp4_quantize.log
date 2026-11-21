@@ -1,0 +1,3 @@
+pulizia runs/verify/b04_mxfp4_quantize: 3.2 MB di build rimossi (2.4 MB restano)
+[b04_mxfp4_quantize] stage=pass passed=True score=(3, 1.0) tempi={'compile': 19.71, 'lint': 0.23, 'sim_build': 6.99, 'sim': 0.5, 'total': 27.8}
+ALL 3016 TEST VECTORS PASS (bit-exact).
