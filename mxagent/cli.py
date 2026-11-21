@@ -16,7 +16,9 @@
     mxagent report runs/eval_<data>   (oppure --dir)
 
 Le run sono sempre una alla volta (una GPU e un Ollama): le campagne eseguono i job in
-sequenza e non esiste ``--parallel``.
+sequenza e non esiste ``--parallel``. ``eval`` (non ``--dry-run``), ``run`` e ``verify``
+prendono un lock esclusivo (:mod:`mxagent.util.runlock`, ``~/.cache/mxagent/run.lock`` o
+``MXAGENT_LOCK_FILE``): se un'altra run è in corso escono con il suo pid e comando.
 """
 from __future__ import annotations
 
@@ -163,6 +165,8 @@ def cmd_verify(a: argparse.Namespace) -> int:
     sources = {p.name: p.read_text(encoding="utf-8") for p in files}
     work = Path(a.work or os.environ.get("MXAGENT_WORK") or "runs/verify")
     mode = a.sbt_mode or ("batch" if os.name == "nt" else "client")
+    from .util.runlock import acquire_or_exit
+    acquire_or_exit()  # una sola run alla volta sulla macchina
     with Verifier(task, work / task.name, sbt_mode=mode, seed=a.seed,
                   random_vectors=a.random) as v:
         rep = v.verify(sources, a.tag)
@@ -226,6 +230,8 @@ def cmd_run(a: argparse.Namespace) -> int:
         raise SystemExit(str(e)) from None
     task = load_task(a.task)
     runs = Path(a.runs_dir or os.environ.get("MXAGENT_RUNS") or cfg.runs_dir)
+    from .util.runlock import acquire_or_exit
+    acquire_or_exit()  # una sola run alla volta (un job di campagna eredita il lock del runner)
     from .verify.infra import infra_outcome
     try:
         if a.mode == "full":
@@ -453,6 +459,8 @@ def cmd_eval(a: argparse.Namespace) -> int:
     if a.dry_run:
         print(describe_campaign(c, r, r.pending(a.retry_errors)))
         return 0
+    from .util.runlock import acquire_or_exit
+    acquire_or_exit()  # nessun'altra run mentre gira la campagna; i job ereditano il lock
     from .util import procs
     errors, warns, est = procs.preflight(jvm_cpus=r.base_config().sim.jvm_cpus)
     for w in warns:
