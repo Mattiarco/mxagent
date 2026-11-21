@@ -63,7 +63,10 @@ class LLMConfig(_Strict):
     timeout_s: float | None = None
     max_retries: int = 2
     anthropic: AnthropicOptions = AnthropicOptions()
-    cache_dir: str = ".cache/llm"
+    #: cache delle risposte (chiave: richiesta completa + seed + digest del modello);
+    #: None = nessuna cache, ogni chiamata va al modello (``mxagent run --no-llm-cache``).
+    #: Una run con TUTTE le chiamate dalla cache è ``replayed`` in result.json.
+    cache_dir: str | None = ".cache/llm"
     roles: dict[str, ModelRole]
     #: profili di modello: nome -> {ruolo: modello}, con ``all`` per tutti i ruoli LLM
     profiles: dict[str, dict[str, str]] = {}

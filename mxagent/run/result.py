@@ -103,6 +103,19 @@ def llm_calls_to_pass(events: list[dict], top: str | None = None) -> int | None:
     return None
 
 
+#: una run è "replayed" se TUTTE le sue chiamate al modello vengono dalla cache LLM
+#: (``llm.cache_dir``): nessuna risposta nuova, il risultato ripete un'esecuzione
+#: precedente. Le run con una parte delle chiamate in cache (frazione in
+#: ``llm_cached_fraction``) non sono replayed: il report le elenca a parte.
+def llm_cache_fields(events: list[dict]) -> dict[str, Any]:
+    """``llm_cached_calls``, ``llm_cached_fraction`` e ``replayed`` dagli eventi ``llm``."""
+    calls = [e for e in events if e.get("kind") == "llm"]
+    cached = sum(bool(e.get("cached")) for e in calls)
+    return {"llm_cached_calls": cached,
+            "llm_cached_fraction": round(cached / len(calls), 4) if calls else None,
+            "replayed": bool(calls) and cached == len(calls)}
+
+
 def llm_result_fields(llm: Any, bud: dict) -> dict[str, Any]:
     """Backend, timeout configurato, tempo nel modello, timeout e costo (result.json)."""
     return {"llm_backend": getattr(llm, "backend", "scripted"),

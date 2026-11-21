@@ -123,12 +123,35 @@ La campagna principale ha 910 job:
   run, quindi i risultati non dipendono dall'ordine dei task né dal
   parallelismo. Con `frozen` si usa una libreria costruita prima, in sola
   lettura; i componenti del task in esame sono comunque esclusi.
-- **Riproducibilità:**
+- **Riproducibilità e cache:**
   - il seed è passato a Ollama;
-  - le risposte sono in cache;
+  - le risposte sono in cache (`llm.cache_dir`, default `.cache/llm`), con chiave
+    richiesta completa + seed + digest del modello. Rieseguire un job già eseguito
+    (anche in un'altra campagna sulla stessa macchina) riprende le risposte: la run
+    dura secondi e **non è un risultato nuovo**. `result.json` registra
+    `llm_cached_calls`, `llm_cached_fraction` e `replayed` (vero se *tutte* le
+    chiamate della run vengono dalla cache). Il report esclude le run replayed dai
+    tassi principali, le elenca in una sezione a parte e avvisa (su stderr e in
+    testa a `report.md`/`summary.md`) senza fallire. Le run con solo una parte
+    delle chiamate in cache restano nei totali e sono elencate con la frazione;
+  - per rieseguire senza cache: `mxagent run --no-llm-cache` (equivale a
+    `--set llm.cache_dir=null`), oppure nella campagna `llm_cache: off` o
+    `mxagent eval --llm-cache off`. Con `llm_cache: campaign` la cache è
+    `<campagna>/llm_cache`: campagne diverse non condividono risposte. Il default
+    `shared` è il comportamento di prima. La cache esistente non viene cancellata;
   - `meta.json` di ogni run registra il digest del modello, l'hash dei prompt e
     le versioni degli strumenti;
   - `campaign.json` registra la campagna e il suo hash.
+
+- **Task esclusi dal totale (`report_exclude`).** La campagna può togliere dei task
+  dai totali principali con un motivo, es. `report_exclude: {b01_e2m1_decode:
+  card_leak}` in [main.yaml](../configs/eval/main.yaml): in `full` la scheda di
+  dominio contiene la tabella dei 16 codici E2M1, che per b01 è la soluzione,
+  mentre le baseline non la ricevono. Il task ha una sezione sua nel report ("b01:
+  card contiene la soluzione") e il report dice su quali task sono calcolati i
+  totali. Per una campagna già eseguita: `mxagent report --dir <campagna>
+  --exclude b01_e2m1_decode:card_leak` (si somma a `report_exclude`). Non cambia i
+  job né l'hash della campagna.
 
 ## Runner
 
@@ -167,6 +190,9 @@ per job), `stats.csv` (una riga per task, modelli e modalità) e `summary.json`.
 | Vincoli di sistema (M7) | b06: target di frequenza rispettato (Fmax ECP5 peggiore sui seed ≥ target); b08: test di protocollo CV-X-IF superato col MAC generato |
 | Qualità dei risultati | transistori e profondità (Yosys generic) dei design passati rispetto al riferimento (media geometrica), tentativi e guadagno del PPA Optimizer |
 | Media ± dev. std | per task, modelli e modalità: pass@1/5/10; pass rate dei vettori e token totali (tutte le run); iterazioni, tempo e token al pass, ADP, LUT/FF xc7 ed Fmax ECP5 (run passate). Per task e non aggregate: area ed Fmax di task diversi non si mediano. Le stesse righe, con LUT/FF ecp5, sono in `stats.csv` |
+| Successo a parità di chiamate, tutte le run | stessa tabella con task esclusi e run replayed compresi: solo controllo |
+| `<task>: <motivo>` | per ogni task in `report_exclude`: tassi propri, senza e con le run replayed |
+| Run replayed | quante e quali (task, modalità, seed), escluse dai tassi; run con cache parziale e frazione |
 | Errori | job in errore o timeout, esclusi dai tassi |
 
 Con 10 seed per cella gli intervalli sono larghi: per esempio 5/10 dà un

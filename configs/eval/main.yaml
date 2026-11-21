@@ -34,4 +34,9 @@ ablations:
     no_memory:     {agent.memory_items: 0}
 
 library: {policy: fresh}           # niente leakage e niente dipendenza dall'ordine
+
+# Task fuori dai totali principali del report, ognuno in una sezione a parte.
+# card_leak: in `full` la scheda di dominio (format_card -> e2m1_table) contiene la
+# tabella dei 16 codici E2M1, che per b01 è la soluzione; le baseline non la vedono.
+report_exclude: {b01_e2m1_decode: card_leak}
 ppa_backends: [generic]            # sintesi di ogni design passato, di ogni modalità

@@ -3,11 +3,22 @@
 Uscite in ``<campagna>/``: ``report.md`` (tabelle), ``runs.csv`` (una riga per
 job), ``summary.json`` (tutti gli aggregati). Job mancanti o finiti in errore
 sono elencati e non contano come fallimenti del modello.
+
+Fuori dai totali principali, ognuno in una sezione sua:
+
+* run **replayed**: tutte le chiamate al modello vengono dalla cache LLM
+  (``replayed`` in result.json o, per le run precedenti al campo, dagli eventi
+  ``llm`` del trace): ripetono un'esecuzione precedente, non sono risultati nuovi.
+  Le run con solo una parte delle chiamate in cache restano nei totali e sono
+  elencate con la frazione;
+* task in ``report_exclude`` della campagna (o ``mxagent report --exclude``), con il
+  motivo (es. ``card_leak``: la scheda di dominio del prompt contiene la soluzione).
 """
 from __future__ import annotations
 
 import csv
 import json
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +77,23 @@ def calls_to_pass(rd: Path, res: dict, m: dict,
     return llm_calls_to_pass(ev, top), "trace"
 
 
+def cache_info(rd: Path, res: dict) -> dict:
+    """``replayed``, ``llm_cached_calls``, ``llm_cached_fraction`` da result.json o, per
+    le run precedenti ai campi, dagli eventi ``llm`` di trace.json (stessa funzione)."""
+    from ..run.result import llm_cache_fields
+
+    if "replayed" in res:
+        return {k: res.get(k) for k in ("replayed", "llm_cached_calls", "llm_cached_fraction")}
+    ev = _read(rd / "trace.json")
+    if ev:
+        return llm_cache_fields(ev)
+    return {"replayed": False, "llm_cached_calls": None, "llm_cached_fraction": None}
+
+
+#: motivi di ``report_exclude`` con un'etichetta per il titolo della sezione
+EXCLUDE_REASONS = {"card_leak": "card contiene la soluzione"}
+
+
 def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
     meta = _read(out / "campaign.json")
     if not meta:
@@ -94,6 +122,7 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
             x7, e5 = _metrics(es, "xc7"), _metrics(es, "ecp5")
             res = _read(rd / "result.json") or {}
             ctp, src = calls_to_pass(rd, res, m, Path(c.benchmarks_dir))
+            r.update(cache_info(rd, res))
             r.update({
                 "passed": bool(m.get("passed")), "stop": m.get("stop"),
                 "best_stage": m.get("best_stage"), "best_pass_rate": m.get("best_pass_rate"),
@@ -228,13 +257,56 @@ def _task_meta(c: Campaign, name: str) -> dict:
     return {"target_mhz": t.timing.target_mhz, "wrapper": t.wrapper}
 
 
-def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
+def _is_replayed(r: dict) -> bool:
+    return r["status"] == "done" and bool(r.get("replayed"))
+
+
+def _ident(r: dict) -> dict:
+    return {k: r[k] for k in ("job", "task", "mode", "variant", "models", "seed")}
+
+
+def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict],
+              exclude: dict[str, str] | None = None) -> dict:
+    """Aggregati. I totali principali escludono i task in ``report_exclude`` (più
+    ``exclude``) e le run replayed; le une e le altre hanno sezioni proprie."""
+    excl = {**c.report_exclude, **(exclude or {})}
+    main_tasks = [t for t in c.tasks if t not in excl]
+    all_main = [r for r in recs if r["variant"] == "main"]
+    recs_all = recs
+    recs = [r for r in recs if r["task"] not in excl and not _is_replayed(r)]
     main = [r for r in recs if r["variant"] == "main"]
     S: dict[str, Any] = {"campaign": c.name, "digest": c.digest()}
-    cnt = Counter(r["status"] for r in recs)
-    S["jobs"] = {"expected": len(recs), **cnt}
+    cnt = Counter(r["status"] for r in recs_all)
+    S["jobs"] = {"expected": len(recs_all), **cnt}
     S["models_seen"] = sorted({(r["models"], r.get("model"), r.get("model_digest"))
-                               for r in recs if r["status"] == "done"}, key=str)
+                               for r in recs_all if r["status"] == "done"}, key=str)
+    S["tasks_main"] = main_tasks
+    S["report_exclude"] = excl
+
+    # run replayed (tutte le chiamate dalla cache) e run con una parte in cache
+    rp = [r for r in recs_all if _is_replayed(r)]
+    S["replayed"] = {
+        "n": len(rp), "by_cell": dict(Counter(f"{r['task']} / {r['mode']}" for r in rp)),
+        "runs": [{**_ident(r), "llm_cached_calls": r.get("llm_cached_calls")} for r in rp]}
+    S["partial_cache"] = [
+        {**_ident(r), "llm_cached_calls": r.get("llm_cached_calls"),
+         "fraction": r.get("llm_cached_fraction")}
+        for r in recs_all if r["status"] == "done" and not r.get("replayed")
+        and (r.get("llm_cached_calls") or 0) > 0]
+
+    # task esclusi dai totali: tassi propri (senza e con le run replayed)
+    S["excluded"] = {}
+    for t, why in excl.items():
+        rs = [r for r in all_main if r["task"] == t]
+        S["excluded"][t] = {
+            "reason": why, "label": EXCLUDE_REASONS.get(why, why),
+            "success": {ms: {m: _rate([r for r in rs if r["models"] == ms and r["mode"] == m
+                                       and not _is_replayed(r)]) for m in c.modes}
+                        for ms in c.models},
+            "success_with_replayed": {ms: {m: _rate([r for r in rs if r["models"] == ms
+                                                     and r["mode"] == m]) for m in c.modes}
+                                      for ms in c.models},
+            "replayed": sum(_is_replayed(r) for r in rs)}
 
     # successo per (modelli, modalità, task) e totale
     succ: dict = defaultdict(dict)
@@ -242,16 +314,16 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
         for mode in c.modes:
             rs = [r for r in main if r["models"] == ms and r["mode"] == mode]
             succ[ms][mode] = {"total": _rate(rs),
-                              "tasks": {t: _rate([r for r in rs if r["task"] == t]) for t in c.tasks}}
+                              "tasks": {t: _rate([r for r in rs if r["task"] == t]) for t in main_tasks}}
             # pass@k medio sui task (k <= seed completati per task)
             pk = {}
             for k in (1, 3, 5, 10):
                 vals = []
-                for t in c.tasks:
+                for t in main_tasks:
                     a = succ[ms][mode]["tasks"][t]
                     if a["n"] >= k:
                         vals.append(pass_at_k(a["n"], a["k"], k))
-                if vals and len(vals) == len(c.tasks):
+                if vals and len(vals) == len(main_tasks):
                     pk[f"pass@{k}"] = sum(vals) / len(vals)
             succ[ms][mode]["pass_at_k"] = pk
     S["success"] = succ
@@ -269,6 +341,10 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
                           for ms in c.models}
     if len(c.models) > 1:
         S["calls_matched"]["(tutti i modelli)"] = success_by_calls(main, c.modes)
+    # stessa tabella su TUTTE le run (task esclusi e run replayed compresi): è il
+    # confronto come lo si faceva prima, per controllo
+    S["calls_matched_all"] = {ms: success_by_calls([r for r in all_main if r["models"] == ms],
+                                                   c.modes) for ms in c.models}
 
     # efficienza sulle run passate
     eff: dict = defaultdict(dict)
@@ -326,27 +402,27 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
     S["qor"] = qor
 
     # vincoli di M7: target di frequenza (task con timing.target_mhz) e wrapper CV-X-IF
-    tasks = {t: _task_meta(c, t) for t in c.tasks}
+    tmeta = {t: _task_meta(c, t) for t in main_tasks}
     m7: dict = defaultdict(dict)
     for ms in c.models:
         for mode in c.modes:
             ok = [r for r in main if r["models"] == ms and r["mode"] == mode and r.get("passed")]
-            tm = [r for r in ok if tasks[r["task"]].get("target_mhz")]
-            wr = [r for r in ok if tasks[r["task"]].get("wrapper")]
+            tm = [r for r in ok if tmeta[r["task"]].get("target_mhz")]
+            wr = [r for r in ok if tmeta[r["task"]].get("wrapper")]
             m7[ms][mode] = {
                 "timing_n": len(tm),
                 "timing_met": sum(1 for r in tm if r.get("fmax_min") is not None
-                                  and r["fmax_min"] >= tasks[r["task"]]["target_mhz"]),
+                                  and r["fmax_min"] >= tmeta[r["task"]]["target_mhz"]),
                 "timing_measured": sum(1 for r in tm if r.get("fmax_min") is not None),
                 "wrapper_n": len(wr), "wrapper_passed": sum(1 for r in wr if r.get("wrapper_passed")),
                 "wrapper_tested": sum(1 for r in wr if r.get("wrapper_passed") is not None)}
     S["m7"] = m7
-    S["stats"] = cell_stats(c, main)
-    S["task_meta"] = tasks
+    S["stats"] = cell_stats(c, main, main_tasks)
+    S["task_meta"] = tmeta
     S["references"] = refs
     S["errors"] = [{"job": r["job"], "status": r["status"], "error": r.get("error", ""),
                     "result_status": r.get("result_status")}
-                   for r in recs if r["status"] in ("error", "timeout")]
+                   for r in recs_all if r["status"] in ("error", "timeout")]
     return S
 
 
@@ -366,13 +442,13 @@ STAT_METRICS = [
 ]
 
 
-def cell_stats(c: Campaign, main: list[dict]) -> list[dict]:
+def cell_stats(c: Campaign, main: list[dict], tasks: list[str] | None = None) -> list[dict]:
     """Una riga per (task, modelli, modalità): pass@1 / pass@k e media ± dev. std.
 
     Per task e non aggregate: area, LUT ed Fmax di task diversi non si mediano.
     """
     rows = []
-    for t in c.tasks:
+    for t in (c.tasks if tasks is None else tasks):
         for ms in c.models:
             for mode in c.modes:
                 rs = [r for r in main if r["task"] == t and r["models"] == ms and r["mode"] == mode
@@ -397,8 +473,9 @@ def _ms(d: dict, fmt: str) -> str:
 
 
 # ---------------------------------------------------------------- output
-def render_calls_matched(cm: dict[str, dict], title: str = "Successo a parità di chiamate") -> list[str]:
-    L = [f"## {title}", "",
+def render_calls_matched(cm: dict[str, dict], title: str = "Successo a parità di chiamate",
+                         note: str = "") -> list[str]:
+    L = [f"## {title}", ""] + ([note, ""] if note else []) + [
          "Run passate con al più k chiamate al modello fino al primo candidato corretto "
          "(`llm_calls_to_pass`, tutti i ruoli; le chiamate dopo il pass, es. PPA, non contano), "
          "sugli stessi job appaiati (task, seed, modelli). k = 7 è il tetto della `baseline-b` "
@@ -436,6 +513,16 @@ def render(c: Campaign, S: dict) -> str:
           f"Libreria: {c.library.policy}.", ""]
     if j.get("done", 0) < j["expected"]:
         L += ["> **Campagna incompleta**: i tassi sono calcolati sulle sole run completate.", ""]
+    rp = S.get("replayed") or {}
+    if rp.get("n"):
+        L += [f"> **Attenzione: {rp['n']} run replayed** (tutte le risposte dalla cache LLM, "
+              "nessuna chiamata nuova al modello): escluse dai tassi principali, elencate in "
+              "\"Run replayed\". Per rieseguirle senza cache: `--llm-cache off` "
+              "(campagna) o `--no-llm-cache` (run).", ""]
+    if S.get("report_exclude"):
+        ex = ", ".join(f"`{t}` ({EXCLUDE_REASONS.get(w, w)})" for t, w in S["report_exclude"].items())
+        L += [f"Totali principali calcolati sui task: {', '.join(f'`{t}`' for t in S['tasks_main'])}. "
+              f"Esclusi dai totali: {ex}; ognuno ha una sezione a parte in fondo.", ""]
     L += ["Modelli:", ""]
     for ms, model, dig in S["models_seen"]:
         L.append(f"- `{ms}`: {model} (digest {str(dig)[:12]})")
@@ -445,7 +532,7 @@ def render(c: Campaign, S: dict) -> str:
     for ms in c.models:
         L += [f"### `{ms}`", "", "| task | " + " | ".join(c.modes) + " |",
               "|---|" + "---|" * len(c.modes)]
-        for t in c.tasks:
+        for t in S.get("tasks_main", c.tasks):
             L.append(f"| {t} | " + " | ".join(_fmt_rate(S["success"][ms][m]["tasks"][t])
                                               for m in c.modes) + " |")
         L.append("| **totale** | " + " | ".join(_fmt_rate(S["success"][ms][m]["total"], ci=True)
@@ -468,6 +555,13 @@ def render(c: Campaign, S: dict) -> str:
         L.append("")
 
     L += render_calls_matched(S["calls_matched"])
+    if S.get("report_exclude") or (S.get("replayed") or {}).get("n"):
+        L += render_calls_matched(
+            S["calls_matched_all"],
+            "Successo a parità di chiamate, tutte le run (controllo)",
+            "Come sopra ma su tutte le run della campagna, compresi i task esclusi e le run "
+            "replayed: è il conteggio senza le correzioni metodologiche, non va usato come "
+            "risultato.")
 
     L += ["## Efficienza (mediane sulle run passate; chiamate e token fino al pass)", "",
           "| modelli | modalità | passate | chiamate LLM | token (k) | tempo (s) | iterazioni |",
@@ -554,6 +648,41 @@ def render(c: Campaign, S: dict) -> str:
                      f"| {_ms(r['ffs_xc7'], '{:.0f}')} | {_ms(r['fmax_mhz'], '{:.1f}')} |")
         L.append("")
 
+    for t, e in (S.get("excluded") or {}).items():
+        L += [f"## {t.split('_')[0]}: {e['label']}", "",
+              f"`{t}` è fuori dai totali principali (motivo: `{e['reason']}`, da `report_exclude`). "
+              "Tassi propri, run replayed escluse; fra parentesi con le replayed"
+              + (f" ({e['replayed']} run replayed)." if e["replayed"] else "."), "",
+              "| modelli | " + " | ".join(c.modes) + " |", "|---|" + "---|" * len(c.modes)]
+        for ms in c.models:
+            L.append(f"| {ms} | " + " | ".join(
+                f"{_fmt_rate(e['success'][ms][m])} ({_fmt_rate(e['success_with_replayed'][ms][m])})"
+                for m in c.modes) + " |")
+        L.append("")
+
+    if rp.get("n") or S.get("partial_cache"):
+        L += ["## Run replayed (dalla cache LLM, escluse dai tassi)", "",
+              "Replayed = tutte le chiamate al modello della run vengono dalla cache "
+              "(`llm.cache_dir`, chiave con richiesta, seed e digest del modello): la run ripete "
+              "un'esecuzione precedente e non è un risultato nuovo.", "",
+              f"Run replayed: {rp.get('n', 0)}"
+              + (" (" + ", ".join(f"{k}: {v}" for k, v in rp["by_cell"].items()) + ")"
+                 if rp.get("by_cell") else "") + ".", ""]
+        if rp.get("runs"):
+            L += ["| task | modalità | variante | modelli | seed | chiamate in cache |",
+                  "|---|---|---|---|---|---|"]
+            L += [f"| {r['task']} | {r['mode']} | {r['variant']} | {r['models']} | {r['seed']} "
+                  f"| {r['llm_cached_calls']} |" for r in rp["runs"]]
+            L.append("")
+        if S.get("partial_cache"):
+            L += ["Run con una parte delle chiamate in cache (restano nei totali):", "",
+                  "| task | modalità | variante | modelli | seed | chiamate in cache | frazione |",
+                  "|---|---|---|---|---|---|---|"]
+            L += [f"| {r['task']} | {r['mode']} | {r['variant']} | {r['models']} | {r['seed']} "
+                  f"| {r['llm_cached_calls']} | {_f(r['fraction'], '{:.0%}')} |"
+                  for r in S["partial_cache"]]
+            L.append("")
+
     if S["errors"]:
         L += ["## Errori di infrastruttura (esclusi dai tassi)", ""]
         L += [f"- `{e['job']}` {e['status']}"
@@ -570,7 +699,8 @@ CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "pas
               "depth", "transistors_pre_opt", "depth_pre_opt", "ppa_tried", "ppa_accepted", "ppa_gain",
               "fmax_min", "fmax_mhz", "adp", "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5",
               "tokens_total", "duplicates", "wrapper_passed", "solution", "best_tests_passed",
-              "best_tests_total", "llm_timeouts", "llm_seconds", "cost_usd"]
+              "best_tests_total", "llm_timeouts", "llm_seconds", "cost_usd", "replayed",
+              "llm_cached_calls", "llm_cached_fraction"]
 STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@3", "pass@5", "pass@10"]
 
 
@@ -587,19 +717,31 @@ def write_calls_curve(path: Path, cm: dict[str, dict], scope: str = "main") -> N
                     w.writerow([scope, ms, m, k, n, d["pairs"]])
 
 
-def write_report(out: Path) -> dict:
+def write_report(out: Path, exclude: dict[str, str] | None = None) -> dict:
     """``summary.md/.csv``, ``notes.md``, ``pass_rate.png`` sempre; con più di un seed
     anche ``report.md``, ``stats.csv``, ``runs.csv`` e ``summary.json`` (pass@k, CI,
     McNemar). Con un seed solo le statistiche inferenziali non si calcolano."""
     c, recs, refs = load_records(out)
+    bad = sorted(set(exclude or {}) - set(c.tasks))
+    if bad:
+        raise SystemExit(f"--exclude: {', '.join(bad)} non sono task della campagna")
+    rp = [r for r in recs if _is_replayed(r)]
+    if rp:  # avviso, non errore: il report si scrive comunque
+        print(f"WARNING: {len(rp)} run replayed (tutte le risposte dalla cache LLM), escluse "
+              "dai tassi principali: " + ", ".join(f"{r['task']}/{r['mode']}/s{r['seed']}"
+                                                  for r in rp[:10])
+              + (" ..." if len(rp) > 10 else ""), file=sys.stderr)
     sm = write_summary(out, c)
     if c.seeds == 1:  # la curva delle chiamate non è inferenziale: si scrive comunque
-        main = [r for r in recs if r["variant"] == "main"]
+        excl = {**c.report_exclude, **(exclude or {})}
+        main = [r for r in recs if r["variant"] == "main" and r["task"] not in excl
+                and not _is_replayed(r)]
         write_calls_curve(out / "calls_curve.csv", {ms: success_by_calls(
             [r for r in main if r["models"] == ms], c.modes) for ms in c.models})
         return {"jobs": sm["jobs"], "summary": "summary.md"}
-    S = summarize(c, recs, refs)
+    S = summarize(c, recs, refs, exclude)
     write_calls_curve(out / "calls_curve.csv", S["calls_matched"])
+    write_calls_curve(out / "calls_curve.csv", S["calls_matched_all"], scope="all_runs")
     S["summary"] = "summary.md"
     (out / "summary.json").write_text(json.dumps(S, indent=1, default=str), encoding="utf-8")
     with (out / "runs.csv").open("w", newline="", encoding="utf-8") as f:

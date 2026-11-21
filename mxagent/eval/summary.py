@@ -20,7 +20,8 @@ FIELDS = ["task", "config", "profile", "seed", "status", "passed", "pass_rate", 
           "candidates_to_pass", "reflect_rounds", "time_to_pass_s", "wall_s",
           "llm_calls", "tokens_in", "tokens_out",
           "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5", "fmax_mean_mhz", "adp_generic",
-          "ppa_gain_pct", "ppa_stop", "best_stage", "reason", "first_error", "job"]
+          "ppa_gain_pct", "ppa_stop", "best_stage", "reason", "first_error", "job",
+          "llm_calls_to_pass", "replayed", "llm_cached_calls"]
 
 
 def _read(p: Path) -> Any:
@@ -88,9 +89,23 @@ def run_rows(out: Path, c: Campaign) -> list[dict]:
             "best_stage": res.get("best_stage"),
             "reason": res.get("reason") or st.get("error"),
             "first_error": res.get("first_error") or (st.get("error") if ist != "done" else None),
+            "llm_calls_to_pass": res.get("llm_calls_to_pass"),
+            **_cache(rd, res),
         })
         rows.append(row)
     return rows
+
+
+def _cache(rd: Path, res: dict) -> dict:
+    """``replayed`` / ``llm_cached_calls`` da result.json o, per le run precedenti ai
+    campi, dagli eventi ``llm`` del trace."""
+    from ..run.result import llm_cache_fields
+
+    if "replayed" in res:
+        return {"replayed": res.get("replayed"), "llm_cached_calls": res.get("llm_cached_calls")}
+    ev = _read(rd / "trace.json")
+    f = llm_cache_fields(ev) if ev else {"replayed": None, "llm_cached_calls": None}
+    return {"replayed": f["replayed"], "llm_cached_calls": f["llm_cached_calls"]}
 
 
 def _med(xs) -> float | None:
@@ -131,6 +146,11 @@ def render(c: Campaign, rows: list[dict], groups: list[dict], png: str | None) -
     else:
         L += [f"> {n} seed per combinazione; qui solo i valori per run e le mediane "
               "(statistiche in report.md).", ""]
+    rp = [r for r in rows if r.get("replayed")]
+    if rp:
+        L += [f"> **Attenzione: {len(rp)} run replayed** (tutte le risposte dalla cache LLM): "
+              + ", ".join(f"{r['task']}/{r['config']}/s{r['seed']}" for r in rp)
+              + ". Non sono risultati nuovi; report.md le esclude dai tassi.", ""]
     budget = f", budget di campagna {c.campaign_budget_s} s" if c.campaign_budget_s else ""
     L += [f"Task: {', '.join(c.tasks)}. Configurazioni: {', '.join(config_name(m) for m in c.modes)}. "
           f"Profili: {', '.join(c.models)}. Seed: {c.seed_start}"
@@ -158,7 +178,8 @@ def render(c: Campaign, rows: list[dict], groups: list[dict], png: str | None) -
                 f" ({r['ppa_stop']})" if r["ppa_stop"] else "")
         L.append(
             f"| {r['task']} | {r['config']} | {r['profile']} | {r['status']} "
-            f"| {'sì' if r['passed'] else 'no'} | {_f(r['pass_rate'], '{:.3f}')} "
+            f"| {'sì' if r['passed'] else 'no'}{' (replayed)' if r.get('replayed') else ''} "
+            f"| {_f(r['pass_rate'], '{:.3f}')} "
             f"| {_f(r['candidates_to_pass'])} | {_f(r['reflect_rounds'])} | {_f(r['time_to_pass_s'])} "
             f"| {_f(r['wall_s'])} | {_f(r['llm_calls'])} | {_f(r['tokens_in'])} | {_f(r['tokens_out'])} "
             f"| {_f(r['luts_xc7'])}/{_f(r['ffs_xc7'])} | {_f(r['luts_ecp5'])}/{_f(r['ffs_ecp5'])} "
