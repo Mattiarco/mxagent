@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import textwrap
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -170,12 +171,14 @@ class Orchestrator:
         for b, res in solved:
             extra[f"{b.module}.scala"] = res.best.sources[f"{b.module}.scala"]
             bt = block_task(b.key, b.module, b.params)
-            subs.append(f"* {b.module} ({b.key}): {CATALOG[b.key].doc}\n  {bt.interface_text()}")
+            # blocco su più righe: tutto rientrato di 2 sotto il punto dell'elenco
+            iface = textwrap.indent(bt.interface_text(submodule=True), "  ")
+            subs.append(f"* {b.module} ({b.key}): {CATALOG[b.key].doc}\n{iface}")
 
         def gen_prompt() -> str:
             return prompts.render("full/integrate", top=self.task.top, spec=self.task.spec_text.strip(),
                                   interface=self.task.interface_text(),
-                                  domain=self.ctx.domain(self.task), submodules="\n".join(subs),
+                                  domain=self.ctx.domain(self.task), submodules="\n\n".join(subs),
                                   glue=plan.glue or "(connect the submodules as needed)")
 
         return ModuleSolver(self.ctx, self.task, self._vf(self.task, "top"), kind="integrate",

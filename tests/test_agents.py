@@ -95,7 +95,9 @@ def test_decompose_integrate_and_library_reuse(tmp_path):
     top_sources = log[-1][2]
     assert "class E2M1Mul" not in top_sources  # ridefinizione del submodulo rimossa
     integ = llm.requests[-1]["messages"][1]["content"]
-    assert "VERIFIED SUBMODULES" in integ and "FixedToFP32" in integ and "y: Output(UInt(32.W))" in integ
+    assert "VERIFIED SUBMODULES" in integ and "FixedToFP32" in integ
+    assert "val y   = Output(UInt(32.W))" in integ and "y: Output(" not in integ
+    assert "do NOT redeclare them; instantiate it with Module(new FixedToFP32)" in integ
     assert len(lib) == 5  # 4 blocchi + il top
     # candidates/<id>: blocchi col nome del modulo, top integrato con prefisso "int"
     cands = sorted(d.name for d in (o.rec.root / "candidates").iterdir())
