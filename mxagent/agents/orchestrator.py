@@ -32,7 +32,8 @@ from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
 from ..run.result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                          llm_result_fields, ppa_attempts, write_result)
+                          llm_cache_fields, llm_calls_to_pass, llm_result_fields, ppa_attempts,
+                          write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
 from ..util.shell import run as _run
@@ -74,6 +75,8 @@ class Orchestrator:
         self.states: list[str] = []
         self._t_pass: float | None = None
         self._llm_at_pass: dict | None = None
+        #: chiamate LLM fino al primo candidato del top che passa (dal trace)
+        self._calls_to_pass: int | None = None
         self._cands_at_pass: int | None = None
         self._finalized = False
         self._selected: str | None = None
@@ -442,6 +445,11 @@ class Orchestrator:
             if final.passed:
                 self._t_pass = time.monotonic()
                 self._llm_at_pass = self.budget.to_dict()  # confronto a pari budget (M6)
+                self._calls_to_pass = llm_calls_to_pass(self.rec.events, self.task.top)
+                if self._calls_to_pass != self._llm_at_pass["calls"]:
+                    # non deve succedere: fra il pass e lo snapshot non parte nessuna chiamata
+                    self.rec.event("calls_to_pass_mismatch", trace=self._calls_to_pass,
+                                   budget=self._llm_at_pass["calls"])
                 self._cands_at_pass = self.ctx.counters["candidates"]
             if final.passed and (self.cfg.agent.ppa or self.cfg.synth.backends):
                 ppa_out = self._ppa_out = self._ppa_safe(final)
@@ -490,6 +498,8 @@ class Orchestrator:
             "sanitized_candidates": c["sanitized"], "kb_hits": c["kb_hits"],
             "llm": self.budget.to_dict(),
             "llm_to_pass": self._llm_at_pass,
+            "llm_calls_to_pass": self._calls_to_pass if passed else None,
+            **llm_cache_fields(self.rec.events),
             "ppa": _ppa_metrics(ppa_out, self.cfg.synth.primary, self.task.timing.target_mhz),
             "wrapper": wrap_out,
         }
@@ -526,6 +536,8 @@ class Orchestrator:
                 "solution": (self._best_info or {}).get("solution", "none"),
                 "best": self._best_info,
                 "llm_to_pass": self._llm_at_pass,
+                "llm_calls_to_pass": self._calls_to_pass if (final and final.passed) else None,
+                **llm_cache_fields(self.rec.events),
                 "duplicates": c.get("duplicates", 0),
                 "ppa": None if not out else {
                     "objective": opt.get("objective"), "gain": opt.get("gain"), "stop": opt.get("stop"),

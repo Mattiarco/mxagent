@@ -81,6 +81,41 @@ def llm_by_role(events: list[dict]) -> dict[str, dict[str, int]]:
     return {k: dict(v) for k, v in out.items()}
 
 
+def llm_calls_to_pass(events: list[dict], top: str | None = None) -> int | None:
+    """Chiamate al modello fino al primo candidato del design di primo livello che
+    passa, compresa quella che lo ha generato; tutti i ruoli (spec, planner, coder,
+    fixer, reflector, integrate...). None se nessun candidato del top passa.
+
+    Si contano gli eventi ``llm`` che PRECEDONO nel trace il primo evento ``verify``
+    con ``passed`` del modulo ``top``: il trace è in ordine cronologico e ogni
+    candidato è verificato dopo la chiamata che lo ha prodotto. I pass dei blocchi
+    della decomposizione (``module`` diverso dal top) non chiudono il conteggio; le
+    baseline non mettono ``module`` nei loro eventi ``verify`` (c'è solo il top).
+    Le chiamate dopo il pass (PPA Optimizer) non sono contate."""
+    n = 0
+    for e in events:
+        k = e.get("kind")
+        if k == "llm":
+            n += 1
+        elif (k == "verify" and e.get("passed")
+              and (top is None or e.get("module") in (None, top))):
+            return n
+    return None
+
+
+#: una run è "replayed" se TUTTE le sue chiamate al modello vengono dalla cache LLM
+#: (``llm.cache_dir``): nessuna risposta nuova, il risultato ripete un'esecuzione
+#: precedente. Le run con una parte delle chiamate in cache (frazione in
+#: ``llm_cached_fraction``) non sono replayed: il report le elenca a parte.
+def llm_cache_fields(events: list[dict]) -> dict[str, Any]:
+    """``llm_cached_calls``, ``llm_cached_fraction`` e ``replayed`` dagli eventi ``llm``."""
+    calls = [e for e in events if e.get("kind") == "llm"]
+    cached = sum(bool(e.get("cached")) for e in calls)
+    return {"llm_cached_calls": cached,
+            "llm_cached_fraction": round(cached / len(calls), 4) if calls else None,
+            "replayed": bool(calls) and cached == len(calls)}
+
+
 def llm_result_fields(llm: Any, bud: dict) -> dict[str, Any]:
     """Backend, timeout configurato, tempo nel modello, timeout e costo (result.json)."""
     return {"llm_backend": getattr(llm, "backend", "scripted"),

@@ -5,7 +5,7 @@
     mxagent golden dot    --a-scale 127 --a 2,2,... --b-scale 127 --b 2,2,...
     mxagent golden quant  --x 1.0,-2.5,...
     mxagent verify --task benchmarks/b01_e2m1_decode [--sources X.scala]
-    mxagent run    --task benchmarks/b01_e2m1_decode [--mode full|baseline-a|baseline-b]
+    mxagent run    --task benchmarks/b01_e2m1_decode [--mode full|baseline-a|baseline-b|baseline-b-matched]
                    [--backend ollama|anthropic --model M --llm-timeout S]
     mxagent synth  --task benchmarks/b05_mxfp4_dot32 [--sources X.scala] | --run runs/<id>
     mxagent wrap   --task benchmarks/b08_mxfp4_mac [--sources X.scala] | --run runs/<id>
@@ -158,6 +158,8 @@ def cmd_run(a: argparse.Namespace) -> int:
         over["llm.backend"] = a.backend
     if a.llm_timeout:
         over["llm.timeout_s"] = a.llm_timeout
+    if a.no_llm_cache:  # la cache resta su disco: semplicemente non si legge né si scrive
+        over["llm.cache_dir"] = None
     for kv in a.set or []:
         k, v = kv.split("=", 1)
         import yaml as _yaml
@@ -303,7 +305,8 @@ def flag_campaign(a: argparse.Namespace, name: str):
         "ppa_backends": a.synth_backends.split(","),
         # SIGTERM al job oltre max_wall_s + 15 min (sintesi finale): result.json resta
         "job_timeout_s": a.max_wall_s + 900,
-        "campaign_budget_s": a.campaign_budget_s, "warmup": not a.no_warmup})
+        "campaign_budget_s": a.campaign_budget_s, "warmup": not a.no_warmup,
+        "llm_cache": a.llm_cache or "shared"})
 
 
 def describe_campaign(c, r, todo: list) -> str:
@@ -323,6 +326,10 @@ def describe_campaign(c, r, todo: list) -> str:
          "budget di campagna: " + (f"{c.campaign_budget_s} s ({c.campaign_budget_s / 3600:.1f} h), "
                                    "poi skipped_budget" if c.campaign_budget_s else "nessuno"),
          f"libreria: {c.library.policy}" + (f" ({c.library.path}, sola lettura)" if c.library.path else ""),
+         "cache LLM: " + {"shared": f"condivisa ({cfg.llm.cache_dir}; job già eseguiti altrove "
+                                    "possono risultare replayed)",
+                          "campaign": f"della campagna ({(r.out / 'llm_cache').as_posix()})",
+                          "off": "nessuna (ogni chiamata va al modello)"}[c.llm_cache],
          "warm-up dei modelli a ogni cambio di profilo (fuori dal conteggio): "
          + ("sì" if c.warmup else "no"), "", "ordine di esecuzione:"]
     done = {j.id for j in js} - {j.id for j in todo}
@@ -356,6 +363,8 @@ def cmd_eval(a: argparse.Namespace) -> int:
         c = load_campaign(a.campaign)
         if a.campaign_budget_s:
             c = c.model_copy(update={"campaign_budget_s": a.campaign_budget_s})
+        if a.llm_cache:
+            c = c.model_copy(update={"llm_cache": a.llm_cache})
         out = Path(a.out or Path("evals") / c.name)
     else:
         out = Path(a.out or Path("runs") / f"eval_{date.today():%Y%m%d}")
@@ -378,7 +387,11 @@ def cmd_report(a: argparse.Namespace) -> int:
     d = Path(a.path or a.dir or "")
     if not str(a.path or a.dir or ""):
         raise SystemExit("serve la cartella della campagna: mxagent report runs/eval_<data>")
-    S = write_report(d)
+    excl = {}
+    for x in a.exclude or []:
+        t, _, why = x.partition(":")
+        excl[t] = why or "excluded"
+    S = write_report(d, excl)
     print(f"report: {d / 'summary.md'}  (job: {S['jobs']})")
     return 0
 
@@ -426,7 +439,8 @@ def main(argv: list[str] | None = None) -> int:
 
     rp = sub.add_parser("run", help="esegue l'agente su un benchmark")
     rp.add_argument("--task", required=True)
-    rp.add_argument("--mode", default="full", help="full | baseline-a | baseline-b")
+    rp.add_argument("--mode", default="full",
+                    help="full | baseline-a | baseline-b | baseline-b-matched (B fino al budget del full)")
     rp.add_argument("--set", nargs="*", metavar="KEY=VAL",
                     help="override della config, es. agent.decompose=false (ablation)")
     rp.add_argument("--model", default=None,
@@ -439,6 +453,9 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--llm-timeout", type=float, default=None, metavar="S",
                     help="timeout di una chiamata al modello in secondi (default: llm.timeout_s, "
                          "oppure 300 per ollama e 120 per anthropic)")
+    rp.add_argument("--no-llm-cache", action="store_true",
+                    help="nessuna cache delle risposte LLM (llm.cache_dir=null): ogni chiamata va "
+                         "al modello; la cache esistente non viene toccata")
     rp.add_argument("--config", default="configs/default.yaml")
     rp.add_argument("--seed", type=int, default=0)
     rp.add_argument("--runs-dir", default=None, help="default $MXAGENT_RUNS o runs_dir della config")
@@ -477,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="cartella della campagna (default evals/<nome> o runs/eval_<data>)")
     g = ep.add_argument_group("campagna senza YAML")
     g.add_argument("--tasks", help="es. b04_mxfp4_quantize,b05_mxfp4_dot32")
-    g.add_argument("--configs", help="full,baseline_a,baseline_b")
+    g.add_argument("--configs", help="full,baseline_a,baseline_b,baseline_b_matched")
     g.add_argument("--model-profiles", help="es. all14b,all32b (llm.profiles della config)")
     g.add_argument("--seeds", default="0", help="0 | 0,1,2 | 0-4")
     g.add_argument("--config", default="configs/default.yaml")
@@ -491,6 +508,9 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--no-warmup", action="store_true", help="niente warm-up dei modelli")
     ep.add_argument("--campaign-budget-s", type=int, default=None,
                     help="tempo massimo della campagna; oltre, i job rimanenti sono skipped_budget")
+    ep.add_argument("--llm-cache", default=None, choices=["shared", "campaign", "off"],
+                    help="cache delle risposte LLM dei job: shared (config, default), campaign "
+                         "(<campagna>/llm_cache, non condivisa con altre campagne) o off")
     ep.add_argument("--parallel", type=int, default=1, help="job in parallelo (Ollama serializza su GPU)")
     ep.add_argument("--retry-errors", action="store_true", help="rifà i job finiti in errore/timeout")
     ep.add_argument("--limit", type=int, default=None, help="esegue al più N job (prove)")
@@ -500,6 +520,9 @@ def main(argv: list[str] | None = None) -> int:
     pp = sub.add_parser("report", help="report di una campagna (anche incompleta)")
     pp.add_argument("path", nargs="?", default=None, help="cartella della campagna")
     pp.add_argument("--dir", default=None, help="come path (forma precedente)")
+    pp.add_argument("--exclude", action="append", metavar="TASK:MOTIVO",
+                    help="toglie un task dai totali principali (sezione a parte), oltre al "
+                         "report_exclude della campagna; es. b01_e2m1_decode:card_leak")
     pp.set_defaults(func=cmd_report)
 
     a = p.parse_args(argv)

@@ -63,7 +63,10 @@ class LLMConfig(_Strict):
     timeout_s: float | None = None
     max_retries: int = 2
     anthropic: AnthropicOptions = AnthropicOptions()
-    cache_dir: str = ".cache/llm"
+    #: cache delle risposte (chiave: richiesta completa + seed + digest del modello);
+    #: None = nessuna cache, ogni chiamata va al modello (``mxagent run --no-llm-cache``).
+    #: Una run con TUTTE le chiamate dalla cache è ``replayed`` in result.json.
+    cache_dir: str | None = ".cache/llm"
     roles: dict[str, ModelRole]
     #: profili di modello: nome -> {ruolo: modello}, con ``all`` per tutti i ruoli LLM
     profiles: dict[str, dict[str, str]] = {}
@@ -103,12 +106,29 @@ class LLMConfig(_Strict):
 
 
 class BudgetConfig(_Strict):
-    """Budget per run: identico fra baseline e sistema completo (confronto a pari costo)."""
+    """Budget per run, lo stesso per tutte le modalità: è un TETTO, non un numero di tentativi.
+
+    Uguali per tutti: ``max_llm_calls``, ``max_tokens``, ``max_wall_s`` (il
+    :class:`~mxagent.llm.chat.Budget` della run). Diverso per modalità: quante
+    chiamate il ciclo fa davvero prima di fermarsi da solo.
+
+    * ``baseline-a``: 1 chiamata;
+    * ``baseline-b``: al più ``1 + max_fix_iters`` (7): NON è a pari tentativi con
+      ``full``;
+    * ``baseline-b-matched``: ``max_fix_iters`` = ``max_llm_calls - 1``, si ferma
+      solo a pass o budget: è il confronto a pari costo con ``full``;
+    * ``full``: pass o budget (al più ``max_llm_calls``).
+
+    La verifica (compilazione, simulazione) non consuma budget se non come tempo.
+    Il confronto a posteriori per numero di chiamate è nel report ("Successo a
+    parità di chiamate", da ``llm_calls_to_pass``). Vedi docs/eval.md.
+    """
 
     max_llm_calls: int = 60
     max_tokens: int = 400_000
     max_wall_s: int = 1800
     best_of_n: int = 3
+    #: correzioni della baseline-b (e del solver monolitico/integrate del full)
     max_fix_iters: int = 6
 
 

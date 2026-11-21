@@ -11,6 +11,18 @@ Politica della libreria (anti-leakage, indipendenza dall'ordine):
             dei task né dai job paralleli.
 ``frozen``  libreria costruita prima (``library.path``) e in sola lettura; i
             componenti del task in esame sono comunque esclusi.
+
+Cache delle risposte LLM (``llm_cache``):
+
+``shared``    ``llm.cache_dir`` della config (default ``.cache/llm``), condivisa con
+              ogni altra run sulla macchina: un job già eseguito altrove con la stessa
+              richiesta e lo stesso seed riprende le risposte (run ``replayed``).
+``campaign``  ``<campagna>/llm_cache``: campagne diverse non condividono risposte.
+``off``       nessuna cache (``llm.cache_dir: null``): ogni chiamata va al modello.
+
+La cache esistente non viene mai cancellata. ``report_exclude`` ({task: motivo})
+toglie dei task dai totali principali del report (es. ``card_leak``: la scheda di
+dominio contiene la soluzione); non cambia i job né l'hash della campagna.
 """
 from __future__ import annotations
 
@@ -27,6 +39,9 @@ from ..config import LLM_ROLES
 from ..run.baselines import MODES
 
 ALL_MODES = (*MODES, "full")
+#: modalità di una campagna che non le elenca: quelle storiche. ``baseline-b-matched``
+#: va chiesta esplicitamente (fino a max_llm_calls chiamate per run: costa come full)
+DEFAULT_MODES = ("baseline-a", "baseline-b", "full")
 
 
 class _Strict(BaseModel):
@@ -95,7 +110,7 @@ class Campaign(_Strict):
     config: str = "configs/default.yaml"
     benchmarks_dir: str = "benchmarks"
     tasks: list[str]
-    modes: list[str] = list(ALL_MODES)
+    modes: list[str] = list(DEFAULT_MODES)
     seeds: int = Field(10, ge=1)
     seed_start: int = 0
     models: dict[str, ModelSet]
@@ -109,6 +124,22 @@ class Campaign(_Strict):
     campaign_budget_s: int | None = Field(None, ge=1)
     #: carica i modelli in Ollama prima del primo job di ogni insieme di modelli
     warmup: bool = False
+    #: cache delle risposte LLM: shared (config) | campaign (<campagna>/llm_cache) | off
+    llm_cache: str = "shared"
+    #: task tolti dai totali principali del report, con il motivo (es. card_leak)
+    report_exclude: dict[str, str] = {}
+
+    @field_validator("llm_cache", mode="before")
+    @classmethod
+    def _cache_yaml_off(cls, v: Any) -> Any:
+        return "off" if v is False else v  # YAML 1.1: `llm_cache: off` senza virgolette è false
+
+    @field_validator("llm_cache")
+    @classmethod
+    def _cache(cls, v: str) -> str:
+        if v not in ("shared", "campaign", "off"):
+            raise ValueError("llm_cache: shared | campaign | off")
+        return v
 
     @field_validator("modes", mode="before")
     @classmethod
@@ -133,11 +164,20 @@ class Campaign(_Strict):
                 raise ValueError(f"ablations.models: {m} non è fra gli insiemi di modelli")
         if "main" in self.ablations.variants:
             raise ValueError("'main' è riservato alle modalità principali")
+        for t in self.report_exclude:
+            if t not in self.tasks:
+                raise ValueError(f"report_exclude: {t} non è fra i task della campagna")
         return self
 
     def digest(self) -> str:
-        return hashlib.sha256(json.dumps(self.model_dump(mode="json"), sort_keys=True)
-                              .encode()).hexdigest()[:12]
+        """Hash di ciò che determina i job. ``report_exclude`` riguarda solo il report e
+        ``llm_cache`` al default non cambia nulla: restano fuori, così l'hash delle
+        campagne già eseguite non cambia."""
+        d = self.model_dump(mode="json")
+        d.pop("report_exclude", None)
+        if d.get("llm_cache") == "shared":
+            d.pop("llm_cache")
+        return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -170,8 +210,14 @@ def jobs(c: Campaign, out_dir: Path) -> list[Job]:
             return {"library.path": c.library.path, "library.readonly": True}
         return {"library.path": str((out_dir / "libs" / job_id).as_posix()), "library.readonly": False}
 
+    cache: dict[str, Any] = {}
+    if c.llm_cache == "off":
+        cache = {"llm.cache_dir": None}
+    elif c.llm_cache == "campaign":
+        cache = {"llm.cache_dir": str((out_dir / "llm_cache").as_posix())}
+
     def add(task: str, mode: str, variant: str, mset: str, seed: int, extra: dict[str, Any]) -> None:
-        ov = {**c.set, **c.models[mset].overrides(mode), **extra}
+        ov = {**c.set, **cache, **c.models[mset].overrides(mode), **extra}
         probe = Job(task, mode, variant, mset, seed, ())
         ov.update(lib(probe.id) if mode == "full" else {})
         out.append(Job(task, mode, variant, mset, seed, tuple(sorted(ov.items()))))
