@@ -45,8 +45,8 @@ from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
-                     llm_result_fields, write_result)
+                     expected_cache_origins, infra_retry_fields, llm_cache_fields,
+                     llm_calls_to_pass, llm_result_fields, retry_event, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
 MODES = ("baseline-a", "baseline-b", "baseline-b-matched")
@@ -133,8 +133,11 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             verifier = Verifier(task, rec.root / "verify", sbt_mode=cfg.sim.sbt_mode,
                                 random_vectors=cfg.sim.random_vectors, seed=cfg.sim.seed,
                                 max_examples=cfg.sim.max_examples, sim_timeout=cfg.sim.timeout_s,
-                                ddmin_rounds=cfg.sim.ddmin_rounds)
+                                ddmin_rounds=cfg.sim.ddmin_rounds, jvm_cpus=cfg.sim.jvm_cpus,
+                                server_start_s=cfg.sim.sbt_server_start_s)
             own_verifier = True
+        if getattr(verifier, "on_infra_retry", "x") is None:  # evento infra_retry nel trace
+            verifier.on_infra_retry = lambda info: rec.event("infra_retry", **retry_event(info))
         verify_fn = verifier.verify
 
     messages = [
@@ -153,6 +156,8 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     cands: list[_best.Candidate] = []  # ogni candidato verificato, per best/
     best_info: dict | None = None
     t_end: list[float] = []  # fine del lavoro (prima della sintesi di best/)
+    #: fase finale (best/): "run", "best", "done"; errore o segnale -> final_phase_error
+    phase: dict = {"final_phase": "run", "final_phase_error": None}
 
     def write_res() -> None:
         """result.json con lo stato corrente (le variabili sono lette alla chiamata)."""
@@ -178,9 +183,10 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
                 else None,
                 **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
+                **infra_retry_fields(rec.events),
                 "history_truncations": truncations, "history_truncated_calls": truncated_calls,
                 "max_fix_iters": st.max_fix_iters,
-                "duplicates": 0, "ppa": None})
+                "duplicates": 0, "ppa": None, **phase})
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
             rec.event("result_error", error=f"{type(e).__name__}: {e}")
 
@@ -247,7 +253,10 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 rec.save_final(best[1], best[0].verilog)
             b = best[0] if best else None
             t_end.append(time.monotonic())
-            best_info = _baseline_best(rec, cfg, task, cands, synth_fn)
+            phase["final_phase"] = "best"
+            write_res()  # provvisorio: l'esito resta anche se best/ viene ucciso
+            best_info = _baseline_best(rec, cfg, task, cands, synth_fn, phase)
+            phase["final_phase"] = "done"
             metrics = {
                 "task": task.name, "mode": mode, "model": role.model, "seed": seed,
                 "passed": stop == "pass", "stop": stop,
@@ -265,6 +274,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 else None,
                 "llm": budget.to_dict(),
                 **llm_cache_fields(rec.events, expected_cache_origins(rec.root)),
+                "final_phase_error": phase["final_phase_error"],
             }
             rec.write_json("metrics.json", metrics)
             return RunResult(rec.root, metrics, b, reports)
@@ -297,22 +307,38 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
 
 
 def _baseline_best(rec: Recorder, cfg: Config, task: Task, cands: list,
-                   synth_fn: "_best.SynthFn | None") -> dict:
+                   synth_fn: "_best.SynthFn | None", phase: dict | None = None) -> dict:
     """``best/`` delle baseline: stesso criterio del sistema completo (run/best.py).
-    Non deve mai far fallire la run."""
-    try:
-        s = cfg.synth
-        if synth_fn is None and s.backends:
-            from ..synth.ppa import synthesize
+    Non deve mai far fallire la run: un errore o un segnale durante la sintesi dei pari
+    merito va in ``phase["final_phase_error"]`` e best/ viene scelto senza sintesi."""
+    phase = phase if phase is not None else {}
+    s = cfg.synth
+    deadline = _best.deadline_for(s)  # synth.best_timeout_s in tutto
+    if synth_fn is None and s.backends:
+        from ..synth.ppa import synthesize
 
-            def synth_fn(verilog: list[str], tag: str) -> dict | None:
-                rep = synthesize(verilog, task, s, rec.root / "best_synth" / tag,
-                                 backends=[s.primary])
-                return rep.summary().get(s.primary)
-        b = _best.select_best(cands, synth_fn)
+        def synth_fn(verilog: list[str], tag: str) -> dict | None:
+            rep = synthesize(verilog, task, _best.capped(s, deadline),
+                             rec.root / "best_synth" / tag, backends=[s.primary])
+            return rep.summary().get(s.primary)
+
+    def pick(fn) -> dict:
+        b = _best.select_best(cands, fn, deadline=deadline)
         sol = "complete" if b is not None and b.report.passed else "partial"
-        info = _best.write_best(rec.root, b, sol, s.primary, ranking=cands)
+        return _best.write_best(rec.root, b, sol, s.primary, ranking=cands)
+    try:
+        info = pick(synth_fn)
+    except RunInterrupted as e:
+        phase["final_phase_error"] = f"interrupted: {e.signame} durante la sintesi di best/"
+        rec.event("best_error", error=phase["final_phase_error"])
+        for c in cands:  # le sintesi a metà non contano
+            c.synth = None
+        try:
+            info = pick(None)
+        except Exception as e2:  # noqa: BLE001
+            info = {"solution": "none", "error": f"{type(e2).__name__}: {e2}"[:300]}
     except Exception as e:  # noqa: BLE001
+        phase["final_phase_error"] = f"{type(e).__name__}: {e}"[:300]
         rec.event("best_error", error=f"{type(e).__name__}: {e}")
         info = {"solution": "none", "error": f"{type(e).__name__}: {e}"[:300]}
     rec.event("best", **{k: v for k, v in info.items()

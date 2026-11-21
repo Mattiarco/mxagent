@@ -32,11 +32,11 @@ from ..run.baselines import RunResult
 from ..run.recorder import Recorder, new_run_id
 from ..run.cleanup import clean_run
 from ..run.result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                          expected_cache_origins, llm_cache_fields, llm_calls_to_pass,
-                          llm_result_fields, ppa_attempts, write_result)
+                          expected_cache_origins, infra_retry_fields, llm_cache_fields,
+                          llm_calls_to_pass, llm_result_fields, ppa_attempts, retry_event,
+                          write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
-from ..util.shell import run as _run
 from ..verify import chisel
 from ..util import procs
 from ..verify.infra import infra_outcome
@@ -73,7 +73,8 @@ class Orchestrator:
             library = Library(cfg.library.path, Embedder(emb.model if emb else None, cfg.llm.host))
         self.library = library if cfg.agent.library else None
         self.ctx = AgentContext(cfg, llm, self.rec, self.library, seed, task.name)
-        self._vf = verifier_factory or self._make_verifier
+        factory = verifier_factory or self._make_verifier
+        self._vf = lambda t, n: self._track_infra(factory(t, n))
         self._synth = synth_fn or synthesize  # (verilog, task, cfg, work, backends) -> PPAReport
         self.sbt_ws = self.rec.root / "sbt"
         self.states: list[str] = []
@@ -91,6 +92,10 @@ class Orchestrator:
         self._final_rep = None  # verifica rieseguita del design finale (run superate)
         self._best_info: dict | None = None
         self._t_end: float | None = None  # fine del lavoro della run (prima di best/)
+        #: fase finale (scelta e sintesi di best/): "run" prima, "best" durante, "done" dopo;
+        #: un errore o un segnale in quella fase va in final_phase_error, l'esito resta
+        self._final_phase = "run"
+        self._final_phase_error: str | None = None
 
     # ------------------------------------------------------------ servizi
     def _make_verifier(self, task: Task, name: str) -> Verifier:
@@ -98,7 +103,15 @@ class Orchestrator:
         return Verifier(task, self.rec.root / "verify" / name, sbt_mode=s.sbt_mode,
                         random_vectors=s.random_vectors, seed=s.seed, max_examples=s.max_examples,
                         sim_timeout=s.timeout_s, ddmin_rounds=s.ddmin_rounds,
-                        sbt_workspace=self.sbt_ws)
+                        sbt_workspace=self.sbt_ws, jvm_cpus=s.jvm_cpus,
+                        server_start_s=s.sbt_server_start_s)
+
+    def _track_infra(self, v):
+        """Ogni nuovo tentativo di verifica dopo un errore di sistema lascia un evento
+        ``infra_retry`` (tentativo, attesa, motivo, JVM vive)."""
+        if hasattr(v, "on_infra_retry") and v.on_infra_retry is None:
+            v.on_infra_retry = lambda info: self.rec.event("infra_retry", **retry_event(info))
+        return v
 
     def _state(self, name: str, **data) -> None:
         self.states.append(name)
@@ -326,12 +339,24 @@ class Orchestrator:
 
     def _best_safe(self, passed: bool, synth: bool = True) -> dict:
         """``best/``: miglior candidato (criterio in mxagent/run/best.py). Non deve mai far
-        fallire la run: un errore è registrato e il campo resta ``none``."""
+        fallire la run: un errore è registrato in ``final_phase_error`` e il campo resta
+        ``none``. Un segnale durante la sintesi dei pari merito la interrompe: best/ viene
+        scelto senza sintesi e la run finisce con il suo esito (già noto)."""
+        self._final_phase = "best"
         try:
             self._best_info = self._select_best(passed, synth)
+        except RunInterrupted as e:
+            self._final_phase_error = f"interrupted: {e.signame} durante la sintesi di best/"
+            self.rec.event("best_error", error=self._final_phase_error)
+            try:
+                self._best_info = self._select_best(passed, False)
+            except Exception as e2:  # noqa: BLE001
+                self._best_info = {"solution": "none", "error": f"{type(e2).__name__}: {e2}"[:300]}
         except Exception as e:  # noqa: BLE001
+            self._final_phase_error = f"{type(e).__name__}: {e}"[:300]
             self.rec.event("best_error", error=f"{type(e).__name__}: {e}")
             self._best_info = {"solution": "none", "error": f"{type(e).__name__}: {e}"[:300]}
+        self._final_phase = "done"
         self.rec.event("best", **{k: v for k, v in self._best_info.items()
                                   if k in ("solution", "tag", "iteration", "tests_passed",
                                            "tests_total", "stage")})
@@ -352,12 +377,14 @@ class Orchestrator:
                                  origin=a.origin)
                  for kind, res in self._top_solves for a in res.attempts if a.report is not None]
 
+        deadline = _best.deadline_for(s)  # synth.best_timeout_s in tutto
+
         def synth_fn(verilog: list[str], tag: str) -> dict | None:
-            rep = self._synth(verilog, self.task, s, self.rec.root / "best_synth" / tag,
-                              backends=[s.primary])
+            rep = self._synth(verilog, self.task, _best.capped(s, deadline),
+                              self.rec.root / "best_synth" / tag, backends=[s.primary])
             return rep.summary().get(s.primary)
 
-        b = _best.select_best(cands, synth_fn if synth and s.backends else None)
+        b = _best.select_best(cands, synth_fn if synth and s.backends else None, deadline=deadline)
         return _best.write_best(self.rec.root, b, "complete" if b and b.report.passed else
                                 "partial", s.primary, ranking=cands)
 
@@ -483,7 +510,8 @@ class Orchestrator:
                            stage=self.states[-1] if self.states else None)
         finally:
             if self.cfg.sim.sbt_mode == "client" and self.sbt_ws.is_dir():
-                _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
+                alive = bool(procs.java_under(self.sbt_ws)) if procs.supported() else None
+                chisel.shutdown_server(self.sbt_ws, self.cfg.sim.jvm_cpus, alive=alive)
 
         passed = bool(final and final.passed)
         if passed:
@@ -500,6 +528,10 @@ class Orchestrator:
         b = best.report if best else None
         c = self.ctx.counters
         self._t_end = time.monotonic()  # best/ (sintesi dei pari merito) non conta nei tempi
+        # result.json provvisorio (final_phase "best"): l'esito è noto e resta su disco
+        # anche se la sintesi di best/ viene uccisa (SIGKILL, macchina riavviata)
+        self._final_phase = "best"
+        self._write_result(t0)
         best_info = self._best_safe(passed)
         metrics = {
             "task": self.task.name, "mode": self.mode, "model": coder, "seed": self.seed,
@@ -522,6 +554,7 @@ class Orchestrator:
             **llm_cache_fields(self.rec.events, expected_cache_origins(self.rec.root)),
             "ppa": _ppa_metrics(ppa_out, self.cfg.synth.primary, self.task.timing.target_mhz),
             "wrapper": wrap_out,
+            "final_phase_error": self._final_phase_error,
         }
         self.rec.write_json("metrics.json", metrics)
         return RunResult(self.rec.root, metrics, b, [a.report for a in (final.attempts if final else [])
@@ -558,6 +591,7 @@ class Orchestrator:
                 "llm_to_pass": self._llm_at_pass,
                 "llm_calls_to_pass": self._calls_to_pass if (final and final.passed) else None,
                 **llm_cache_fields(self.rec.events, expected_cache_origins(self.rec.root)),
+                **infra_retry_fields(self.rec.events),
                 "duplicates": c.get("duplicates", 0),
                 "ppa": None if not out else {
                     "objective": opt.get("objective"), "gain": opt.get("gain"), "stop": opt.get("stop"),
@@ -565,6 +599,8 @@ class Orchestrator:
                     "final": out.get("final"), "error": out.get("error")},
                 "final_dir": "final" if self._finalized else None,
                 "states": self.states,
+                "final_phase": self._final_phase,
+                "final_phase_error": self._final_phase_error,
             }
             write_result(self.rec, result)
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale

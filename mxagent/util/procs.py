@@ -37,6 +37,29 @@ class Proc:
         return self.is_java and ("sbt-launch" in c or "xsbt.boot" in c or "sbt.ForkMain" in c
                                  or "-Dsbt." in c or "sbt.server" in c)
 
+    @property
+    def role(self) -> str:
+        """server (di ``--client``), client (JVM thin client), batch, forkmain o java."""
+        c = self.cmdline
+        if not self.is_java:
+            return self.name
+        if "sbt.ForkMain" in c:
+            return "forkmain"
+        if not self.is_sbt:
+            return "java"
+        if "--detach-stdio" in c or "--server" in c:
+            return "server"
+        if "--client" in c or "sbt.client" in c or "NetworkClient" in c:
+            return "client"
+        return "batch"
+
+    @property
+    def active_cpus(self) -> int | None:
+        """``-XX:ActiveProcessorCount`` della JVM (None se assente)."""
+        import re
+        m = re.search(r"-XX:ActiveProcessorCount=(\d+)", self.cmdline)
+        return int(m[1]) if m else None
+
 
 def _status(pid: int) -> dict[str, str]:
     out = {}
@@ -295,17 +318,19 @@ def snapshot() -> Snapshot:
 
 # --------------------------------------------------------- stima e controllo
 #: thread di picco stimati per job (vedi :func:`job_peak_threads`)
-def job_peak_threads(ncpu: int, sbt_mode: str = "client") -> int:
+def job_peak_threads(ncpu: int, sbt_mode: str = "client", jvm_cpus: int | None = None) -> int:
     """Stima prudente dei task (processi + thread) di picco di UN job.
 
-    * server sbt (JVM): GC paralleli e compilatori JIT ~ ncpu, pool di sbt/zinc e
-      Chisel ~ 60 -> 2*ncpu + 60;
-    * client sbt (``--client``, JVM o sbtn) o JVM ``-batch`` a freddo: ncpu + 30;
+    * server sbt (JVM): GC paralleli e compilatori JIT ~ c, pool di sbt/zinc e
+      Chisel ~ 60 -> 2*c + 60, con c = ``jvm_cpus`` (``-XX:ActiveProcessorCount``,
+      ``sim.jvm_cpus``) o tutti i core se non limitato;
+    * client sbt (``--client``, JVM o sbtn) o JVM ``-batch`` a freddo: c + 30;
     * firtool (``--mlir-disable-threading``) e il processo Python della run: ~ 15;
     * Verilator: build con ``make``/g++ (fino a ncpu processi) e cocotb: ncpu + 10.
     """
-    jvm = 2 * ncpu + 60
-    client = ncpu + 30
+    c = min(ncpu, jvm_cpus) if jvm_cpus else ncpu
+    jvm = 2 * c + 60
+    client = c + 30
     return jvm + client + 15 + ncpu + 10
 
 
@@ -319,12 +344,14 @@ def supported() -> bool:
     return os.name != "nt" and PROC.is_dir()
 
 
-def preflight(parallel: int, snap: Snapshot | None = None) -> tuple[list[str], list[str], dict]:
+def preflight(parallel: int, snap: Snapshot | None = None,
+              jvm_cpus: int | None = None) -> tuple[list[str], list[str], dict]:
     """Controllo prima di una campagna: (problemi bloccanti, avvisi, stima)."""
     s = snap or snapshot()
-    per_job = job_peak_threads(s.ncpu)
+    per_job = job_peak_threads(s.ncpu, jvm_cpus=jvm_cpus)
     need = parallel * per_job + RESERVED_TASKS
     est = {"parallel": parallel, "per_job_tasks": per_job, "reserved_tasks": RESERVED_TASKS,
+           "jvm_cpus": jvm_cpus,
            "need_tasks": need, "ncpu": s.ncpu, "pids_limit": s.pids_limit, "pids_used": s.pids_used}
     errors, warns = [], []
     if not supported():
@@ -376,6 +403,7 @@ def render_snapshot(s: Snapshot) -> str:
     L.append(f"JVM dell'utente: {len(s.java)}" + (f" (orfane di sbt: {len(s.orphans)})" if s.java else ""))
     for p in s.java:
         tag = " ORFANA" if p in s.orphans else ""
-        L.append(f"  pid {p.pid} ppid {p.ppid} thread {p.threads}{tag} cwd {p.cwd or '?'}  "
-                 f"{p.cmdline[:140]}")
+        cpus = f" cpu {p.active_cpus}" if p.active_cpus else ""
+        L.append(f"  pid {p.pid} ppid {p.ppid} {p.role} thread {p.threads}{cpus}{tag} "
+                 f"cwd {p.cwd or '?'}  {p.cmdline[:140]}")
     return "\n".join(L)

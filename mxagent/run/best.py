@@ -24,6 +24,7 @@ iterazione in cui il candidato è stato prodotto).
 from __future__ import annotations
 
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,8 +74,11 @@ def rank_key(c: Candidate) -> tuple:
 
 
 def select_best(cands: list[Candidate], synth_fn: SynthFn | None = None,
-                max_synth: int = 3) -> Candidate | None:
-    """Miglior candidato secondo :func:`rank_key`; sintetizza (c) solo i pari merito."""
+                max_synth: int = 3, deadline: float | None = None) -> Candidate | None:
+    """Miglior candidato secondo :func:`rank_key`; sintetizza (c) solo i pari merito.
+
+    ``deadline`` (``time.monotonic()``): oltre, i pari merito restanti non vengono
+    sintetizzati (``skipped: best_timeout``) e contano come sintesi non riuscita."""
     cands = [c for c in cands if c.report is not None]
     if not cands:
         return None
@@ -83,12 +87,28 @@ def select_best(cands: list[Candidate], synth_fn: SynthFn | None = None,
                   key=lambda c: c.seq, reverse=True)
     if synth_fn is not None and top[0]:
         for c in tied[:max_synth]:
+            if c.synth is None and deadline is not None and time.monotonic() >= deadline:
+                c.synth = {"ok": False, "skipped": "best_timeout"}
             if c.synth is None:
                 try:
                     c.synth = synth_fn(list(c.report.verilog), c.tag)
                 except Exception as e:  # noqa: BLE001 - la sintesi non deve far fallire la run
                     c.synth = {"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
     return max(cands, key=rank_key)
+
+
+def deadline_for(cfg) -> float | None:
+    """Scadenza della sintesi di best/ da ``synth.best_timeout_s`` (None = nessuna)."""
+    t = getattr(cfg, "best_timeout_s", 0)
+    return time.monotonic() + t if t else None
+
+
+def capped(cfg, deadline: float | None):
+    """SynthConfig con ``timeout_s`` non oltre il tempo rimasto fino a ``deadline``."""
+    if deadline is None:
+        return cfg
+    left = max(1, int(deadline - time.monotonic()))
+    return cfg.model_copy(update={"timeout_s": min(cfg.timeout_s, left)}) if left < cfg.timeout_s else cfg
 
 
 def summary(c: Candidate | None, solution: str, primary: str = "generic") -> dict:

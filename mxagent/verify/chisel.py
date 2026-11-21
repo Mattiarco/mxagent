@@ -55,10 +55,13 @@ class ElabResult:
     verilog: list[Path] = field(default_factory=list)
     seconds: float = 0.0
     log: str = ""
+    returncode: int | None = None
+    timed_out: bool = False
 
     def to_dict(self) -> dict:
         return {"ok": self.ok, "errors": [asdict(e) for e in self.errors],
-                "verilog": [str(p) for p in self.verilog], "seconds": round(self.seconds, 2)}
+                "verilog": [str(p) for p in self.verilog], "seconds": round(self.seconds, 2),
+                "returncode": self.returncode}
 
 
 # ----------------------------------------------------------------- workspace
@@ -231,14 +234,72 @@ def _finish(errs: list[SourceError], src_dir: Path | None) -> list[SourceError]:
 
 
 # --------------------------------------------------------------- esecuzione
+#: CPU che vede ogni JVM di sbt (``-XX:ActiveProcessorCount``; ``sim.jvm_cpus``). La JVM
+#: dimensiona su questo numero i thread del GC, dei compilatori JIT, del ForkJoinPool e
+#: dei pool di sbt/zinc/Scala: con tutti i core di una macchina grande (20 sul DGX Spark)
+#: un server sbt per run tiene un centinaio di thread. Il Verilog prodotto non cambia.
+DEFAULT_JVM_CPUS = 4
+#: tempo massimo perché il server di ``sbt --client`` scriva ``active.json``: oltre, il
+#: comando viene interrotto come errore di sistema invece di aspettare tutto il timeout
+DEFAULT_SERVER_START_S = 240
+#: prefisso del motivo (riconosciuto da infra.SBT_SERVER)
+SERVER_NOT_STARTED = "sbt server did not start"
+
+
+def sbt_env(jvm_cpus: int | None = DEFAULT_JVM_CPUS) -> dict[str, str]:
+    """Ambiente dei comandi sbt: ``SBT_OPTS`` (default ``-Xss8m``, Chisel ricorre in
+    profondità) più ``-XX:ActiveProcessorCount`` se non già presente. Vale per il
+    server di ``--client`` (avviato dal primo comando del workspace) e per ``-batch``."""
+    opts = os.environ.get("SBT_OPTS", "-Xss8m")
+    if jvm_cpus and "ActiveProcessorCount" not in opts:
+        opts = f"{opts} -XX:ActiveProcessorCount={int(jvm_cpus)}".strip()
+    return {"SBT_OPTS": opts, "NO_COLOR": "1"}
+
+
+def active_file(work: Path) -> Path:
+    """Scritto dal server sbt di ``work`` all'avvio, cancellato allo shutdown."""
+    return Path(work) / "project" / "target" / "active.json"
+
+
+def shutdown_server(work: Path, jvm_cpus: int | None = DEFAULT_JVM_CPUS, alive: bool | None = None,
+                    timeout: float = 60) -> Result | None:
+    """``sbt --client shutdown`` solo se un server c'è: senza server il client ne
+    avvierebbe uno nuovo solo per spegnerlo. ``alive`` (JVM vive nel workspace, se
+    note) ha la precedenza su ``active.json``, che resta se il server muore di colpo:
+    in quel caso il file viene tolto, così il comando successivo parte pulito."""
+    act = active_file(work)
+    if alive is None:
+        alive = act.is_file()
+    if not alive:
+        act.unlink(missing_ok=True)
+        return None
+    return run(sbt_cmd("client", "shutdown"), cwd=work, timeout=timeout, env=sbt_env(jvm_cpus))
+
+
 def sbt_cmd(mode: str, command: str) -> list[str]:
     if mode == "client":
         return ["sbt", "--client", command]
     return ["sbt", "-batch", "-Dsbt.supershell=false", command]
 
 
+def server_watch(work: Path, start_s: float | None):
+    """``watch`` di :func:`run` per ``sbt --client``: se all'inizio del comando il server
+    non c'è (nessun ``active.json``) e non compare entro ``start_s`` secondi, il client
+    sta aspettando un server che non è partito (es. la JVM non ha potuto creare thread).
+    None se il server c'è già o senza limite."""
+    if not start_s or active_file(work).is_file():
+        return None
+
+    def watch(elapsed: float) -> str | None:
+        if elapsed >= start_s and not active_file(work).is_file():
+            return f"{SERVER_NOT_STARTED} in {elapsed:.0f}s (no {active_file(work).name})"
+        return None
+    return watch
+
+
 def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch",
-              timeout: float = 900) -> ElabResult:
+              timeout: float = 900, jvm_cpus: int | None = DEFAULT_JVM_CPUS,
+              server_start_s: float | None = DEFAULT_SERVER_START_S) -> ElabResult:
     """Compila ed elabora ``<pkg>.<top>``; emette SystemVerilog in ``out_dir``."""
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -248,18 +309,21 @@ def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch"
     # client: il server sbt (JVM persistente) deve sopravvivere al comando; lo chiude
     # Verifier.close. batch: a fine comando nessun processo del gruppo resta vivo.
     r: Result = run(sbt_cmd(mode, cmd), cwd=work, timeout=timeout,
-                    env={"SBT_OPTS": os.environ.get("SBT_OPTS", "-Xss8m"), "NO_COLOR": "1"},
-                    keep_group=mode == "client")
+                    env=sbt_env(jvm_cpus), keep_group=mode == "client",
+                    watch=server_watch(work, server_start_s) if mode == "client" else None)
     log = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.log)
     src_dir = work / "src" / "main" / "scala" / pkg
     verilog = sorted([*out_dir.rglob("*.sv"), *out_dir.rglob("*.v")])
     if r.timed_out:
-        return ElabResult(False, [SourceError("sbt", f"timeout dopo {timeout:.0f}s")], [], r.seconds, log)
+        return ElabResult(False, [SourceError("sbt", f"timeout dopo {timeout:.0f}s")], [], r.seconds, log,
+                          r.returncode, timed_out=True)
+    if r.aborted:  # server non partito: errore di sistema (infra.classify_build -> sbt_server)
+        return ElabResult(False, [SourceError("sbt", r.aborted)], [], r.seconds, log, None)
     if not r.ok or not verilog:
         errs = parse_sbt_log(log, src_dir, pkg) or [SourceError("sbt", "elaborazione fallita senza "
                                                                "errori riconoscibili")]
-        return ElabResult(False, errs, [], r.seconds, log)
-    return ElabResult(True, [], verilog, r.seconds, log)
+        return ElabResult(False, errs, [], r.seconds, log, r.returncode)
+    return ElabResult(True, [], verilog, r.seconds, log, r.returncode)
 
 
 def _same_drive(a: Path, b: Path) -> bool:

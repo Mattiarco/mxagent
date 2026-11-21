@@ -21,12 +21,13 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from ..bench.kernels import get_kernel
 from ..bench.task import Task
 from ..util import procs
 from . import chisel, lint
-from .infra import InfraError, classify, classify_exc
+from .infra import InfraError, classify, classify_build, classify_exc
 from .ddmin import complexity, minimize
 from .feedback import SimSummary, compare, patterns, pick_representatives, table_rows
 from .sim import Simulator
@@ -75,12 +76,16 @@ class Verifier:
                  random_vectors: int = 2000, seed: int = 0, max_examples: int = 3,
                  sim_timeout: float = 900, ddmin_rounds: int = 8, max_vectors: int = 200_000,
                  sbt_workspace: Path | None = None,
-                 infra_backoff: tuple[float, ...] = (10, 30, 60)):
+                 infra_backoff: tuple[float, ...] = (10, 30, 60),
+                 jvm_cpus: int | None = chisel.DEFAULT_JVM_CPUS,
+                 server_start_s: float | None = chisel.DEFAULT_SERVER_START_S):
         self.task = task
         self.work = Path(work_dir)
         # workspace sbt condivisibile fra più Verifier della stessa run (un solo server JVM)
         self.sbt_ws = Path(sbt_workspace) if sbt_workspace else self.work / "sbt"
         self.sbt_mode = sbt_mode
+        self.jvm_cpus = jvm_cpus  # -XX:ActiveProcessorCount delle JVM di sbt
+        self.server_start_s = server_start_s  # server sbt --client non partito -> infra
         self.seed = seed
         self.n_random = random_vectors
         self.max_examples = max_examples
@@ -89,6 +94,9 @@ class Verifier:
         self.max_vectors = max_vectors
         #: attese prima di ogni nuovo tentativo dopo un errore di sistema (len = tentativi in più)
         self.infra_backoff = tuple(infra_backoff)
+        #: chiamata a ogni nuovo tentativo dopo un errore di sistema (evento ``infra_retry``
+        #: nel trace della run); riceve lo stesso dict aggiunto a ``infra_retries``
+        self.on_infra_retry: Callable[[dict], None] | None = None
         self.kernel = get_kernel(task.golden)
         self.num = task.numerics_obj
         self._vecs: list[tuple[str, Vec]] | None = None
@@ -146,10 +154,19 @@ class Verifier:
                     job.mkdir(parents=True, exist_ok=True)
                     rep.save(job / "report.json")
                 return rep
-            retries.append({"attempt": attempt + 1, "where": where, "detail": detail})
-            self.kill_leftovers()
-            if attempt < len(self.infra_backoff):
-                time.sleep(self.infra_backoff[attempt])
+            java = _java_alive()  # prima della pulizia: chi c'era quando è fallito
+            killed = self.kill_leftovers()
+            wait = self.infra_backoff[attempt] if attempt < len(self.infra_backoff) else None
+            info = {"attempt": attempt + 1, "where": where, "detail": detail, "tag": tag,
+                    "wait_s": wait, "java": java, "killed": killed}
+            retries.append(info)
+            if wait is not None:  # segue un nuovo tentativo
+                if self.on_infra_retry is not None:
+                    try:
+                        self.on_infra_retry(dict(info))
+                    except Exception:  # noqa: BLE001 - il tracciamento non ferma la verifica
+                        pass
+                time.sleep(wait)
         rep = VerifyReport(tag, self.task.name, "infra", False, infra=detail, infra_retries=retries,
                            error_keys=[f"infra:{detail[:120]}"])
         job.mkdir(parents=True, exist_ok=True)
@@ -166,8 +183,8 @@ class Verifier:
         """Dopo un errore di sistema o a fine run: server sbt del workspace (shutdown,
         poi SIGTERM/SIGKILL alle JVM con cwd nel workspace)."""
         if self.sbt_mode == "client" and self.sbt_ws.is_dir():
-            from ..util.shell import run as _run
-            _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
+            alive = bool(procs.java_under(self.sbt_ws)) if procs.supported() else None
+            chisel.shutdown_server(self.sbt_ws, self.jvm_cpus, alive=alive)
         return procs.kill_pids([p.pid for p in procs.java_under(self.sbt_ws)])
 
     def _verify_once(self, sources: dict[str, str], tag: str) -> VerifyReport:
@@ -181,11 +198,17 @@ class Verifier:
         # 1. compilazione + elaborazione
         ws = chisel.prepare_workspace(self.sbt_ws)
         chisel.write_sources(ws, pkg, sources)
-        el = chisel.elaborate(ws, pkg, self.task.top, job / "verilog", mode=self.sbt_mode)
+        el = chisel.elaborate(ws, pkg, self.task.top, job / "verilog", mode=self.sbt_mode,
+                              jvm_cpus=self.jvm_cpus, server_start_s=self.server_start_s)
         (job / "elaborate.log").write_text(el.log, encoding="utf-8")
         rep.compile, rep.seconds["compile"] = el.to_dict(), round(el.seconds, 2)
         if not el.ok:
-            self._infra(el.log + "\n" + "\n".join(e.message for e in el.errors), "compile")
+            # errore di sistema nel log, JVM uccisa da un segnale, server che non risponde, o
+            # sbt fallito senza nessun errore del sorgente (server morto): mai al modello
+            hit = classify_build(el.log, [(e.stage, e.message) for e in el.errors], el.returncode,
+                                 el.timed_out)
+            if hit:
+                raise _InfraHit(hit, "compile")
             rep.error_keys = [e.key() for e in el.errors]
             rep.feedback = "COMPILATION FAILED:\n" + "\n".join(e.render() for e in el.errors[:5])
             rep.feedback_raw = raw_build_log(el.log)
@@ -299,6 +322,15 @@ class Verifier:
         rep.seconds["total"] = round(time.monotonic() - t0, 2)
         rep.save(job / "report.json")
         return rep
+
+
+def _java_alive(limit: int = 12) -> list[str]:
+    """JVM vive dell'utente come ``pid:ruolo:thread`` (vuoto senza /proc)."""
+    try:
+        me = procs.os.getuid() if hasattr(procs.os, "getuid") else None
+        return [f"{p.pid}:{p.role}:{p.threads}" for p in procs.procs(me) if p.is_java][:limit]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 class _InfraHit(Exception):

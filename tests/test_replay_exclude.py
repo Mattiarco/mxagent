@@ -120,6 +120,39 @@ def test_cli_no_llm_cache_sets_cache_dir_none(monkeypatch, tmp_path):
     assert seen["cache_dir"] is None
 
 
+@pytest.mark.parametrize("args,expected", [
+    (["--llm-cache", "off"], None),
+    (["--llm-cache", "DIR"], "DIR"),
+    (["--llm-cache", "shared"], ".cache/llm"),
+    ([], ".cache/llm"),
+])
+def test_cli_llm_cache_option_of_single_runs(monkeypatch, tmp_path, args, expected):
+    from mxagent import cli
+    seen = {}
+
+    def fake(task, cfg, *a, **kw):
+        seen["cache_dir"] = cfg.llm.cache_dir
+        raise SystemExit(0)
+
+    monkeypatch.setattr("mxagent.run.baselines.run_loop", fake)
+    monkeypatch.setattr("mxagent.agents.orchestrator.run_full", fake)
+    args = [str(tmp_path / "own") if a == "DIR" else a for a in args]
+    expected = str(tmp_path / "own") if expected == "DIR" else expected
+    for mode in ("baseline-b", "full"):
+        seen.clear()
+        with pytest.raises(SystemExit):
+            cli.main(["run", "--task", str(ROOT / "benchmarks" / "b01_e2m1_decode"), "--mode", mode,
+                      *args, "--runs-dir", str(tmp_path)])
+        assert seen["cache_dir"] == expected
+
+
+def test_cli_no_llm_cache_and_llm_cache_dir_are_exclusive(tmp_path):
+    from mxagent import cli
+    with pytest.raises(SystemExit, match="alternativi"):
+        cli.main(["run", "--task", str(ROOT / "benchmarks" / "b01_e2m1_decode"), "--no-llm-cache",
+                  "--llm-cache", "x", "--runs-dir", str(tmp_path)])
+
+
 # ------------------------------------------------ report su campagna finta
 TASKS = ["b01_e2m1_decode", "b03_e8m0_to_fp32", "b05_mxfp4_dot32"]
 MODES = ["baseline-b", "full"]

@@ -64,7 +64,7 @@ class LLMConfig(_Strict):
     max_retries: int = 2
     anthropic: AnthropicOptions = AnthropicOptions()
     #: cache delle risposte (chiave: richiesta completa + seed + digest del modello);
-    #: None = nessuna cache, ogni chiamata va al modello (``mxagent run --no-llm-cache``).
+    #: None = nessuna cache, ogni chiamata va al modello (``mxagent run --llm-cache off``).
     #: Una run con TUTTE le chiamate dalla cache è ``replayed`` in result.json.
     cache_dir: str | None = ".cache/llm"
     roles: dict[str, ModelRole]
@@ -135,6 +135,12 @@ class BudgetConfig(_Strict):
 class SimConfig(_Strict):
     simulator: str = "verilator"
     sbt_mode: str = "client"  # client = server sbt persistente (~1 s a caldo), batch = a freddo
+    #: CPU viste da ogni JVM di sbt (-XX:ActiveProcessorCount): fissa i thread del GC, del
+    #: JIT e dei pool di sbt invece di dimensionarli su tutti i core (0/null = nessun limite)
+    jvm_cpus: int | None = 4
+    #: secondi entro cui il server di sbt --client deve partire (active.json), altrimenti
+    #: errore di sistema e retry invece di aspettare timeout_s (0/null = nessun limite)
+    sbt_server_start_s: int | None = 240
     max_examples: int = 3  # vettori minimi riportati nel feedback
     ddmin_rounds: int = 8
     random_vectors: int = 2000
@@ -158,6 +164,9 @@ class SynthConfig(_Strict):
     clock_ns: float = Field(10.0, gt=0)
     pnr_seeds: list[int] = [1, 2, 3]
     timeout_s: int = 1800
+    #: tempo totale per sintetizzare i pari merito di best/ dopo la run (0 = nessun limite);
+    #: ogni sintesi ha come timeout il minimo fra timeout_s e il tempo rimasto
+    best_timeout_s: int = Field(600, ge=0)
     # PPA Optimizer: obiettivo, iterazioni, soglie di accettazione
     objective: str = "adp"  # area | delay | adp (area x delay)
     optimize_iters: int = Field(4, ge=0)

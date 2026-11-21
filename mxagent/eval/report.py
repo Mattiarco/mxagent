@@ -522,7 +522,7 @@ def render(c: Campaign, S: dict) -> str:
         L += [f"> **Attenzione: {rp['n']} run replayed** (tutte le risposte dalla cache LLM, "
               "nessuna chiamata nuova al modello): escluse dai tassi principali, elencate in "
               "\"Run replayed\". Per rieseguirle senza cache: `--llm-cache off` "
-              "(campagna) o `--no-llm-cache` (run).", ""]
+              "(campagna e run singola).", ""]
     if S.get("report_exclude"):
         ex = ", ".join(f"`{t}` ({EXCLUDE_REASONS.get(w, w)})" for t, w in S["report_exclude"].items())
         L += [f"Totali principali calcolati sui task: {', '.join(f'`{t}`' for t in S['tasks_main'])}. "

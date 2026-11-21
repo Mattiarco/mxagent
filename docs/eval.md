@@ -149,8 +149,10 @@ La campagna principale ha 910 job:
     tassi principali, le elenca in una sezione a parte e avvisa (su stderr e in
     testa a `report.md`/`summary.md`) senza fallire. Le run con solo una parte
     delle chiamate in cache restano nei totali e sono elencate con la frazione;
-  - per rieseguire senza cache: `mxagent run --no-llm-cache` (equivale a
-    `--set llm.cache_dir=null`), oppure nella campagna `llm_cache: off` o
+  - per rieseguire senza cache: `mxagent run --llm-cache off` (o
+    `--no-llm-cache`; equivale a `--set llm.cache_dir=null`); `--llm-cache DIR` usa
+    una cache propria (prove fuori campagna che non toccano quella condivisa),
+    `--llm-cache shared` quella della config. Nella campagna `llm_cache: off` o
     `mxagent eval --llm-cache off`. Con `llm_cache: campaign` la cache è
     `<campagna>/llm_cache`: campagne diverse non condividono risposte; è
     l'impostazione di [main.yaml](../configs/eval/main.yaml) e
@@ -183,15 +185,45 @@ La campagna principale ha 910 job:
   distinti dai fallimenti del modello. Il report li elenca e li esclude dai tassi.
   Se la run ha lasciato `result.json` (es. `interrupted` per SIGHUP), il suo
   stato è riportato in `result_status`.
+- **Fase finale (`best/`):** dopo l'esito (DONE/FAILED) la run sceglie il miglior
+  candidato e sintetizza i pari merito (al più 3). `result.json` viene scritto
+  subito, prima di `best/`, con `final_phase: "best"`, e riscritto alla fine con
+  `final_phase: "done"`: se la sintesi viene uccisa (SIGKILL) resta su disco con
+  l'esito. La sintesi dei pari merito ha `synth.best_timeout_s` (default 600 s) in
+  tutto: ogni sintesi ha come timeout il minimo fra `synth.timeout_s` e il tempo
+  rimasto, quelle oltre la scadenza sono `skipped: best_timeout`. Prima ogni
+  sintesi poteva durare 1800 s: 3 pari merito dopo una run da 1800 s superavano il
+  timeout del job (5400 s) e una run `failed` diventava `timeout`. Un'eccezione
+  della fase o un segnale durante la sintesi vanno in `final_phase_error`
+  (`result.json` e `metrics.json`). Un segnale ferma la sintesi, `best/` viene
+  scelto senza sintesi e l'esito resta quello della run (non `interrupted`).
 - **Errori di sistema durante la verifica** ([infra.py](../mxagent/verify/infra.py),
   unico elenco di pattern): "unable to create native thread", "Resource temporarily
   unavailable" / Errno 11 / EAGAIN, "Cannot allocate memory", `OutOfMemoryError` e
   altri errori fatali della JVM, "Too many open files", "No space left on device",
-  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Non sono
-  errori del candidato:
+  nell'output di sbt/firtool/Verilator/cocotb o nelle eccezioni Python. Nella
+  compilazione/elaborazione con sbt sono di sistema anche (`classify_build`): la JVM
+  terminata da un segnale (`sbt_signal`, exit < 0 o 134/135/137/139/143), client e
+  server che non si parlano (`sbt_server`: "Connection refused", server non avviato
+  o che non risponde), e un fallimento senza nessun errore riferito al sorgente,
+  cioè nessun errore scalac, firtool o di elaborazione nel log (`sbt_no_errors`; es.
+  il server morto a metà comando, log con solo `[error] Total time: 1 s`). Un
+  timeout della compilazione e le eccezioni di elaborazione senza posizione nel
+  sorgente (`ChiselException`, `StackOverflowError`) restano errori del candidato.
+  Eccezione: in modalità client, se il server non c'era all'inizio del comando e
+  `project/target/active.json` non compare entro `sim.sbt_server_start_s` (240 s),
+  il client sta aspettando un server che non è partito (es. la JVM non ha potuto
+  creare thread): il comando viene interrotto ed è `sbt_server` ("sbt server did not
+  start"), senza aspettare i 900 s di `sim.timeout_s`.
+  Non sono errori del candidato:
   - la verifica dello stesso candidato viene ripetuta fino a 3 volte (attese 10, 30,
     60 s), dopo aver chiuso il server sbt del workspace e terminato le JVM rimaste;
-    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`;
+    i tentativi sono in `infra_retries` del `report.json` e dell'evento `verify`.
+    Ogni nuovo tentativo lascia nel trace un evento `infra_retry` (`attempt`,
+    `wait_s`, `where`, `tag`, `reason`, `java`: JVM vive dell'utente come
+    `pid:ruolo:thread` al momento dell'errore, `killed`: pid terminati prima di
+    riprovare), anche se poi l'errore persiste; `result.json` li riporta in
+    `infra_retries` (lista vuota se non ce ne sono);
   - il feedback non arriva mai al modello e non consuma iterazioni, reflect, dedup
     né anti-loop: dal punto di vista del ciclo la verifica non è mai avvenuta;
   - se l'errore persiste la run si ferma con `status: "error"`, `reason: "infra:
@@ -209,13 +241,28 @@ La campagna principale ha 910 job:
   SIGTERM e poi SIGKILL (salvo il server di `sbt --client`, chiuso a fine run). A
   fine run e a fine job vengono terminate le JVM con la directory di lavoro nella
   cartella della run (`jvm_killed` nel trace e in `index.jsonl`).
+- **Thread delle JVM di sbt:** ogni run ha il proprio server `sbt --client` (una JVM
+  per run). Senza limiti la JVM dimensiona thread del GC, compilatori JIT,
+  ForkJoinPool e pool di sbt/zinc/Scala su tutti i core (20 sul DGX Spark).
+  `sim.jvm_cpus` (default 4) passa `-XX:ActiveProcessorCount` alle JVM di sbt
+  (server, client JVM, `-batch`) tramite `SBT_OPTS`, insieme a `-Xss8m`. Un
+  `SBT_OPTS` dell'utente che contiene già `ActiveProcessorCount` vince. Il Verilog
+  prodotto non cambia: cambia solo quanti thread tiene ogni JVM. `sbt --client
+  shutdown` parte solo se il server esiste (altrimenti il client ne avvierebbe uno
+  per spegnerlo); un `active.json` rimasto da un server morto viene tolto.
 - **Controllo delle risorse:** `mxagent eval` controlla prima di partire il limite
   sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto a parallel x
-  picco stimato per job (2·cpu+60 thread del server sbt, cpu+30 del client,
-  firtool, cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux, sintesi), e la
-  presenza di JVM di sbt orfane; se non basta si ferma con il motivo (`--force` per
-  partire comunque). Diagnosi: `scripts/check_resources.sh` oppure `mxagent doctor
-  --resources --parallel N [--kill-orphans]`. Il dry-run mostra parallel e la stima.
+  picco stimato per job (2·c+60 thread del server sbt e c+30 del client, con c =
+  `sim.jvm_cpus`; firtool; cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux,
+  sintesi), e la presenza di JVM di sbt orfane; se non basta si ferma con il motivo
+  (`--force` per partire comunque). Diagnosi: `scripts/check_resources.sh` (limiti,
+  thread per comando, ruolo, thread, CPU viste e mappe di ogni JVM, overcommit e
+  `vm.max_map_count`, perché `pthread_create` dà EAGAIN anche quando non riesce a
+  mappare lo stack) oppure `mxagent doctor --resources --parallel N
+  [--kill-orphans]`. Il dry-run mostra parallel, `sim.jvm_cpus` e la stima. Misura
+  durante una prova: `scripts/watch_resources.sh OUT.tsv 5 PID...` (task
+  dell'utente, JVM con ruolo e thread, firtool, Verilator, g++, Yosys, Ollama,
+  memoria ogni 5 s).
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.
