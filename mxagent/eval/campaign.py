@@ -27,6 +27,9 @@ from ..config import LLM_ROLES
 from ..run.baselines import MODES
 
 ALL_MODES = (*MODES, "full")
+#: modalità di una campagna che non le elenca: quelle storiche. ``baseline-b-matched``
+#: va chiesta esplicitamente (fino a max_llm_calls chiamate per run: costa come full)
+DEFAULT_MODES = ("baseline-a", "baseline-b", "full")
 
 
 class _Strict(BaseModel):
@@ -95,7 +98,7 @@ class Campaign(_Strict):
     config: str = "configs/default.yaml"
     benchmarks_dir: str = "benchmarks"
     tasks: list[str]
-    modes: list[str] = list(ALL_MODES)
+    modes: list[str] = list(DEFAULT_MODES)
     seeds: int = Field(10, ge=1)
     seed_start: int = 0
     models: dict[str, ModelSet]

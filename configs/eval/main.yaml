@@ -6,7 +6,7 @@ name: main
 config: configs/default.yaml       # budget identico per tutte le modalità
 tasks: [b01_e2m1_decode, b02_e2m1_mul, b03_e8m0_to_fp32, b04_mxfp4_quantize, b05_mxfp4_dot32,
         b06_mxfp4_dot32_pipe, b07_nvfp4_dot16, b08_mxfp4_mac]
-modes: [baseline-a, baseline-b, full]
+modes: [baseline-a, baseline-b, baseline-b-matched, full]  # matched = B fino al budget del full
 seeds: 10
 seed_start: 0
 

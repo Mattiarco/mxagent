@@ -86,7 +86,7 @@ def test_shipped_campaigns_are_valid(tmp_path):
         assert jobs(c, tmp_path)
     c = load_campaign(ROOT / "configs" / "eval" / "b04_b05.yaml")
     js = jobs(c, tmp_path)
-    assert len(js) == 120 and {j.task for j in js} == {"b04_mxfp4_quantize", "b05_mxfp4_dot32"}
+    assert len(js) == 160 and {j.task for j in js} == {"b04_mxfp4_quantize", "b05_mxfp4_dot32"}
 
 
 # ------------------------------------------------- runner + report (finti)

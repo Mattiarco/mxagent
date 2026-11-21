@@ -35,6 +35,37 @@ def _ppa_primary(d: dict | None) -> dict | None:
     return g.get("metrics") if g.get("ok") else None
 
 
+def calls_to_pass(rd: Path, res: dict, m: dict,
+                  bench_dir: Path = Path("benchmarks")) -> tuple[int | None, str | None]:
+    """``llm_calls_to_pass`` della run e da dove viene: ``result`` (campo di result.json),
+    ``trace`` (run precedenti al campo: ricostruito da trace.json con la stessa
+    funzione) o ``budget`` (né campo né trace: snapshot del budget al pass del full,
+    totale della run per le baseline, che si fermano al pass)."""
+    from ..run.result import llm_calls_to_pass
+
+    if not (res.get("passed") or m.get("passed")):
+        return None, None
+    if res.get("llm_calls_to_pass") is not None:
+        return int(res["llm_calls_to_pass"]), "result"
+    ev = _read(rd / "trace.json")
+    if not ev:
+        b = m.get("llm_to_pass") or m.get("llm") or {}
+        return (b.get("calls"), "budget") if b.get("calls") is not None else (None, None)
+    top = None
+    meta = _read(rd / "meta.json") or {}
+    task = meta.get("task") or res.get("task")
+    if task:
+        from ..bench.task import load_task
+        try:
+            top = load_task(bench_dir / task).top
+        except (FileNotFoundError, OSError):
+            top = None
+    if top is None:  # top dagli eventi: il modulo dell'ultimo verify passato
+        top = next((e.get("module") for e in reversed(ev)
+                    if e.get("kind") == "verify" and e.get("passed")), None)
+    return llm_calls_to_pass(ev, top), "trace"
+
+
 def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
     meta = _read(out / "campaign.json")
     if not meta:
@@ -62,11 +93,16 @@ def load_records(out: Path) -> tuple[Campaign, list[dict], dict[str, dict]]:
             wr = _read(rd / "eval_wrap" / "wrap_report.json")
             x7, e5 = _metrics(es, "xc7"), _metrics(es, "ecp5")
             res = _read(rd / "result.json") or {}
+            ctp, src = calls_to_pass(rd, res, m, Path(c.benchmarks_dir))
             r.update({
                 "passed": bool(m.get("passed")), "stop": m.get("stop"),
                 "best_stage": m.get("best_stage"), "best_pass_rate": m.get("best_pass_rate"),
                 "iterations": m.get("iterations"), "time_to_pass_s": m.get("time_to_pass_s"),
-                "wall_s": m.get("wall_s"), "calls_to_pass": llm.get("calls") if m.get("passed") else None,
+                "wall_s": m.get("wall_s"),
+                # chiamate fino al primo pass (tutti i ruoli): result.json o, per le run
+                # precedenti al campo, ricostruite dal trace con la stessa funzione
+                "calls_to_pass": ctp, "calls_to_pass_src": src,
+                "calls_to_pass_budget": llm.get("calls") if m.get("passed") else None,
                 "tokens_to_pass": llm.get("tokens") if m.get("passed") else None,
                 "calls_total": (m.get("llm") or {}).get("calls"),
                 "model": m.get("model"), "model_digest": meta_r.get("model_digest"),
@@ -141,6 +177,48 @@ def _pairs(recs: list[dict], a: dict, b: dict) -> dict:
             "p_mcnemar": mcnemar_exact(only_a, only_b)}
 
 
+#: soglie della tabella "successo a parità di chiamate": 7 = 1 + max_fix_iters della
+#: baseline-b attuale, 60 = budget.max_llm_calls (baseline-b-matched e full)
+CALL_KS = (7, 15, 30, 60)
+
+
+def success_by_calls(recs: list[dict], modes: list[str], ks: tuple[int, ...] = CALL_KS,
+                     kmax: int | None = None) -> dict:
+    """Successi con al più k chiamate al modello, sugli STESSI job appaiati.
+
+    Una chiave (task, seed, modelli) entra se ogni modalità eseguita ha una run
+    completata (``status == done``) per quella chiave; le modalità senza alcuna run
+    completata sono elencate in ``missing_modes`` e non restringono l'insieme. Per
+    ogni k e modalità: run passate con ``calls_to_pass <= k``. ``curve[mode][k-1]`` =
+    successi cumulati con al più k chiamate, per k = 1..kmax (dati per un grafico).
+    Una run passata senza ``calls_to_pass`` (trace illeggibile) è contata in
+    ``unknown_calls`` e non entra in nessuna soglia."""
+    def key(r):
+        return (r["task"], r["seed"], r["models"])
+
+    done = [r for r in recs if r["status"] == "done"]
+    by_mode = {m: {key(r): r for r in done if r["mode"] == m} for m in modes}
+    present = [m for m in modes if by_mode[m]]
+    common = set.intersection(*(set(by_mode[m]) for m in present)) if present else set()
+    obs = [by_mode[m][k_]["calls_to_pass"] for m in present for k_ in common
+           if by_mode[m][k_].get("passed") and by_mode[m][k_].get("calls_to_pass") is not None]
+    kmax = kmax or max([*ks, *obs])
+    out: dict[str, Any] = {"pairs": len(common), "modes": present,
+                           "missing_modes": [m for m in modes if m not in present],
+                           "keys": sorted(common), "by_k": {}, "curve": {}, "passed_any": {},
+                           "unknown_calls": {}, "kmax": kmax}
+    for m in present:
+        rs = [by_mode[m][k_] for k_ in common]
+        ok = [r for r in rs if r.get("passed")]
+        calls = [r["calls_to_pass"] for r in ok if r.get("calls_to_pass") is not None]
+        out["passed_any"][m] = len(ok)
+        out["unknown_calls"][m] = len(ok) - len(calls)
+        out["curve"][m] = [sum(c <= k for c in calls) for k in range(1, kmax + 1)]
+    for k in ks:
+        out["by_k"][k] = {m: out["curve"][m][k - 1] if k <= kmax else None for m in present}
+    return out
+
+
 def _task_meta(c: Campaign, name: str) -> dict:
     from ..bench.task import load_task
     try:
@@ -185,6 +263,12 @@ def summarize(c: Campaign, recs: list[dict], refs: dict[str, dict]) -> dict:
             for base in [m for m in c.modes if m != "full"]:
                 S["paired"][f"{ms}: full vs {base}"] = _pairs(
                     main, {"mode": "full", "models": ms}, {"mode": base, "models": ms})
+
+    # successo a parità di chiamate al modello (stessi job appaiati, k = soglia)
+    S["calls_matched"] = {ms: success_by_calls([r for r in main if r["models"] == ms], c.modes)
+                          for ms in c.models}
+    if len(c.models) > 1:
+        S["calls_matched"]["(tutti i modelli)"] = success_by_calls(main, c.modes)
 
     # efficienza sulle run passate
     eff: dict = defaultdict(dict)
@@ -313,6 +397,34 @@ def _ms(d: dict, fmt: str) -> str:
 
 
 # ---------------------------------------------------------------- output
+def render_calls_matched(cm: dict[str, dict], title: str = "Successo a parità di chiamate") -> list[str]:
+    L = [f"## {title}", "",
+         "Run passate con al più k chiamate al modello fino al primo candidato corretto "
+         "(`llm_calls_to_pass`, tutti i ruoli; le chiamate dopo il pass, es. PPA, non contano), "
+         "sugli stessi job appaiati (task, seed, modelli). k = 7 è il tetto della `baseline-b` "
+         "(1 + `max_fix_iters`), k = 60 il budget `max_llm_calls` di `full` e "
+         "`baseline-b-matched`. Curva completa per k = 1..kmax in `calls_curve.csv`.", ""]
+    for ms, d in cm.items():
+        modes = d["modes"]
+        L.append(f"### `{ms}`: {d['pairs']} job appaiati")
+        if d["missing_modes"]:
+            L.append(f"(modalità senza run completate, escluse dall'appaiamento: "
+                     f"{', '.join(d['missing_modes'])})")
+        L += ["", "| k (chiamate) | " + " | ".join(modes) + " |", "|---|" + "---|" * len(modes)]
+        for k, row in d["by_k"].items():
+            L.append(f"| ≤ {k} | " + " | ".join(
+                "–" if row[m] is None else f"{row[m]}/{d['pairs']}" for m in modes) + " |")
+        L.append("| passate (qualunque k) | " + " | ".join(
+            f"{d['passed_any'][m]}/{d['pairs']}" for m in modes) + " |")
+        unk = {m: n for m, n in d["unknown_calls"].items() if n}
+        if unk:
+            L.append("")
+            L.append("> passate senza conteggio delle chiamate (trace assente), fuori dalle soglie: "
+                     + ", ".join(f"{m}: {n}" for m, n in unk.items()))
+        L.append("")
+    return L
+
+
 def render(c: Campaign, S: dict) -> str:
     L: list[str] = [f"# Report della campagna `{c.name}`", ""]
     j = S["jobs"]
@@ -354,6 +466,8 @@ def render(c: Campaign, S: dict) -> str:
             L.append(f"| {name} | {p['pairs']} | {_f(p['rate_a'], '{:.0%}')} | {_f(p['rate_b'], '{:.0%}')} "
                      f"| {p['only_a']} | {p['only_b']} | {p['p_mcnemar']:.3g} |")
         L.append("")
+
+    L += render_calls_matched(S["calls_matched"])
 
     L += ["## Efficienza (mediane sulle run passate; chiamate e token fino al pass)", "",
           "| modelli | modalità | passate | chiamate LLM | token (k) | tempo (s) | iterazioni |",
@@ -450,7 +564,8 @@ def render(c: Campaign, S: dict) -> str:
 
 
 CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "passed", "stop",
-              "best_stage", "best_pass_rate", "iterations", "calls_to_pass", "tokens_to_pass",
+              "best_stage", "best_pass_rate", "iterations", "calls_to_pass", "calls_to_pass_src",
+              "calls_to_pass_budget", "tokens_to_pass",
               "calls_total", "time_to_pass_s", "wall_s", "model", "model_digest", "transistors",
               "depth", "transistors_pre_opt", "depth_pre_opt", "ppa_tried", "ppa_accepted", "ppa_gain",
               "fmax_min", "fmax_mhz", "adp", "luts_xc7", "ffs_xc7", "luts_ecp5", "ffs_ecp5",
@@ -459,15 +574,32 @@ CSV_FIELDS = ["job", "task", "mode", "variant", "models", "seed", "status", "pas
 STATS_CSV_FIELDS = ["task", "models", "mode", "runs", "passed", "pass@1", "pass@3", "pass@5", "pass@10"]
 
 
+def write_calls_curve(path: Path, cm: dict[str, dict], scope: str = "main") -> None:
+    """Una riga per (insieme di modelli, modalità, k): successi cumulati con <= k chiamate."""
+    new = not path.exists() or scope == "main"
+    with path.open("w" if new else "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["scope", "models", "mode", "k", "passed", "pairs"])
+        for ms, d in cm.items():
+            for m, curve in d["curve"].items():
+                for k, n in enumerate(curve, 1):
+                    w.writerow([scope, ms, m, k, n, d["pairs"]])
+
+
 def write_report(out: Path) -> dict:
     """``summary.md/.csv``, ``notes.md``, ``pass_rate.png`` sempre; con più di un seed
     anche ``report.md``, ``stats.csv``, ``runs.csv`` e ``summary.json`` (pass@k, CI,
     McNemar). Con un seed solo le statistiche inferenziali non si calcolano."""
     c, recs, refs = load_records(out)
     sm = write_summary(out, c)
-    if c.seeds == 1:
+    if c.seeds == 1:  # la curva delle chiamate non è inferenziale: si scrive comunque
+        main = [r for r in recs if r["variant"] == "main"]
+        write_calls_curve(out / "calls_curve.csv", {ms: success_by_calls(
+            [r for r in main if r["models"] == ms], c.modes) for ms in c.models})
         return {"jobs": sm["jobs"], "summary": "summary.md"}
     S = summarize(c, recs, refs)
+    write_calls_curve(out / "calls_curve.csv", S["calls_matched"])
     S["summary"] = "summary.md"
     (out / "summary.json").write_text(json.dumps(S, indent=1, default=str), encoding="utf-8")
     with (out / "runs.csv").open("w", newline="", encoding="utf-8") as f:

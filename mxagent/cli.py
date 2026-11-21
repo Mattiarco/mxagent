@@ -5,7 +5,7 @@
     mxagent golden dot    --a-scale 127 --a 2,2,... --b-scale 127 --b 2,2,...
     mxagent golden quant  --x 1.0,-2.5,...
     mxagent verify --task benchmarks/b01_e2m1_decode [--sources X.scala]
-    mxagent run    --task benchmarks/b01_e2m1_decode [--mode full|baseline-a|baseline-b]
+    mxagent run    --task benchmarks/b01_e2m1_decode [--mode full|baseline-a|baseline-b|baseline-b-matched]
                    [--backend ollama|anthropic --model M --llm-timeout S]
     mxagent synth  --task benchmarks/b05_mxfp4_dot32 [--sources X.scala] | --run runs/<id>
     mxagent wrap   --task benchmarks/b08_mxfp4_mac [--sources X.scala] | --run runs/<id>
@@ -426,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
 
     rp = sub.add_parser("run", help="esegue l'agente su un benchmark")
     rp.add_argument("--task", required=True)
-    rp.add_argument("--mode", default="full", help="full | baseline-a | baseline-b")
+    rp.add_argument("--mode", default="full",
+                    help="full | baseline-a | baseline-b | baseline-b-matched (B fino al budget del full)")
     rp.add_argument("--set", nargs="*", metavar="KEY=VAL",
                     help="override della config, es. agent.decompose=false (ablation)")
     rp.add_argument("--model", default=None,
@@ -477,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="cartella della campagna (default evals/<nome> o runs/eval_<data>)")
     g = ep.add_argument_group("campagna senza YAML")
     g.add_argument("--tasks", help="es. b04_mxfp4_quantize,b05_mxfp4_dot32")
-    g.add_argument("--configs", help="full,baseline_a,baseline_b")
+    g.add_argument("--configs", help="full,baseline_a,baseline_b,baseline_b_matched")
     g.add_argument("--model-profiles", help="es. all14b,all32b (llm.profiles della config)")
     g.add_argument("--seeds", default="0", help="0 | 0,1,2 | 0-4")
     g.add_argument("--config", default="configs/default.yaml")

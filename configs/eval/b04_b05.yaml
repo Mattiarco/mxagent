@@ -1,5 +1,5 @@
 # Valutazione dopo la revisione della run b01: b04 e b05, tre modalità, due modelli,
-# 10 seed per cella = 2 task x 3 modalità x 2 modelli x 10 seed = 120 run.
+# 10 seed per cella = 2 task x 4 modalità x 2 modelli x 10 seed = 160 run (120 senza baseline-b-matched).
 # b01 è escluso: il prompt contiene già la tabella completa e anche la baseline passa.
 #
 # Tempo: ogni run ha max_wall_s = 1800 s di budget; nel caso peggiore la campagna
@@ -13,7 +13,8 @@
 name: b04_b05
 config: configs/default.yaml       # budget identico per tutte le modalità
 tasks: [b04_mxfp4_quantize, b05_mxfp4_dot32]
-modes: [baseline-a, baseline-b, full]   # baseline_a = single-shot, baseline_b = loop con log grezzi
+modes: [baseline-a, baseline-b, baseline-b-matched, full]   # baseline_a = single-shot, baseline_b = loop con log grezzi
+# baseline-b-matched: come B ma fino al budget del full (max_llm_calls), confronto a pari costo
 seeds: 10
 seed_start: 0
 

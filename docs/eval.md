@@ -58,7 +58,7 @@ intervalli di confidenza né test; con più seed si aggiungono `report.md`,
 
 Un YAML ([main.yaml](../configs/eval/main.yaml)) dichiara:
 - task;
-- modalità (`baseline-a`, `baseline-b`, `full`);
+- modalità (`baseline-a`, `baseline-b`, `baseline-b-matched`, `full`);
 - numero di seed;
 - insiemi di modelli;
 - ablation;
@@ -68,21 +68,56 @@ Un YAML ([main.yaml](../configs/eval/main.yaml)) dichiara:
 Ogni job è una combinazione (task, modalità, variante, modelli, seed) e gira
 come sottoprocesso `mxagent run` in `<campagna>/runs/<job>/`.
 
-La campagna principale ha 750 job:
-- 8 task × 3 modalità × 2 modelli × 10 seed = 480 job principali;
+La campagna principale ha 910 job:
+- 8 task × 4 modalità × 2 modelli × 10 seed = 640 job principali;
 - 9 ablation × 3 task × 1 modello × 10 seed = 270 job di ablation.
 
 **Equità del confronto.**
-- **Stesso budget:** tutti i job usano lo stesso `budget` della config di base
-  (chiamate LLM, token, tempo).
+- **Stesso budget, non stesso numero di tentativi.** Tutti i job ricevono lo
+  stesso `budget` della config di base (`max_llm_calls`, `max_tokens`,
+  `max_wall_s`) come *tetto*. Quanti tentativi una modalità fa davvero dipende però
+  dal suo ciclo:
+
+  | modalità | si ferma a | chiamate al più (default) |
+  |---|---|---|
+  | `baseline-a` | una generazione | 1 |
+  | `baseline-b` | pass, `1 + budget.max_fix_iters` chiamate o budget | 7 |
+  | `baseline-b-matched` | pass o budget (`max_fix_iters = max_llm_calls - 1`) | 60 |
+  | `full` | pass o budget (`max_llm_calls`, token, tempo) | 60 |
+
+  Quindi `full` contro `baseline-b` **non** è a parità di tentativi: `full` può
+  fare fino a 60 chiamate, B al più 7. Il confronto a pari costo è fra `full` e
+  `baseline-b-matched` (stesso Budget, stessi limiti) oppure, a posteriori, la
+  sezione del report "Successo a parità di chiamate" (run passate con al più k
+  chiamate, k = 7, 15, 30, 60, sugli stessi job). `baseline-b` resta invariata
+  perché i risultati già raccolti restino validi.
+
+  Cosa resta diverso anche con `baseline-b-matched`: la verifica (compilazione e
+  simulazione) non è nel budget, salvo il tempo; i token per chiamata sono
+  diversi (`full`: prompt con scheda di dominio, regole, esempi; B: storia che
+  cresce a ogni turno fino a `num_ctx`), quindi `max_tokens` può scattare a numeri
+  di chiamate diversi (lo stop è in `result.json`, `reason: "budget: ..."`); la
+  baseline B tiene la storia multi-turn
+  completa e, quando supera `num_ctx`, toglie le coppie (risposta, feedback) più
+  vecchie, tenendo sempre sistema, primo messaggio utente e ultimo feedback. Quante
+  coppie sono state tolte e in quante chiamate è in `history_truncations` e
+  `history_truncated_calls` di `result.json`/`metrics.json` (eventi
+  `history_truncated` nel trace): con ~60 turni il troncamento è la condizione
+  normale della baseline e va riportato.
 - **Stesso modello:** con `all: <modello>` baseline e sistema completo usano lo
   stesso modello. Il routing piccolo/grande e il passaggio al modello più grande
   dell'anti-loop sono quindi neutri in questa campagna. Per studiarli serve un
   insieme di modelli con `roles:` diversi; la baseline usa allora `baseline:`
   (default: il modello del coder).
-- **Costo fino al pass:** le chiamate dello stadio PPA, che avviene dopo il pass,
-  non contano. Il report usa `llm_to_pass` per il sistema completo e `llm` per le
-  baseline, che si fermano al pass.
+- **Costo fino al pass:** `llm_calls_to_pass` in `result.json` è il numero di
+  chiamate al modello fino al primo candidato del design di primo livello che
+  passa, compresa quella che lo ha generato, contando tutti i ruoli (spec,
+  planner, coder, fixer, reflector, integrate). I pass dei blocchi della
+  decomposizione non chiudono il conteggio; le chiamate dopo il pass (PPA
+  Optimizer) non contano. Si ricava dagli eventi `llm` del trace che precedono il
+  primo evento `verify` passato del top; `None` se la run non passa. `llm_calls`
+  resta il totale della run. Per le run precedenti al campo il report lo ricostruisce
+  da `trace.json` con la stessa funzione (`calls_to_pass_src` in `runs.csv`).
 - **Niente leakage:** con la politica `fresh`, la default, ogni run del sistema
   completo parte da una libreria vuota tutta sua. Il riuso avviene solo dentro la
   run, quindi i risultati non dipendono dall'ordine dei task né dal
@@ -125,7 +160,8 @@ per job), `stats.csv` (una riga per task, modelli e modalità) e `summary.json`.
 |---|---|
 | Successo | k/n per task e modalità, totale con intervallo di Wilson al 95%, pass@k (stimatore non distorto, Chen et al. 2021) mediato sui task |
 | Confronto appaiato | `full` contro ogni baseline sulle stesse coppie (task, seed): run vinte solo da A o solo da B, p-value esatto di McNemar |
-| Efficienza | mediane sulle run passate: chiamate LLM e token fino al pass, tempo, iterazioni |
+| Successo a parità di chiamate | per k = 7, 15, 30, 60: run passate con `llm_calls_to_pass` ≤ k, per modalità, sugli stessi job appaiati (task, seed, modelli); curva completa per k = 1..kmax in `calls_curve.csv` |
+| Efficienza | mediane sulle run passate: chiamate LLM (`llm_calls_to_pass`) e token fino al pass, tempo, iterazioni |
 | Fallimenti | fase del miglior candidato delle run fallite (compile / lint / sim / nessun codice), run fermate dal budget |
 | Ablation | ogni variante contro `full` sugli stessi task e seed: tassi, Δ, McNemar |
 | Vincoli di sistema (M7) | b06: target di frequenza rispettato (Fmax ECP5 peggiore sui seed ≥ target); b08: test di protocollo CV-X-IF superato col MAC generato |

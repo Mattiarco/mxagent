@@ -5,6 +5,21 @@
 * **Baseline B** (``baseline-b``): agente generico generate -> compile -> test
   con i **log grezzi** degli strumenti e storia multi-turn completa (come un
   agente base o un ReChisel minimale), fino a successo, ``max_fix_iters`` o budget.
+  Al più ``1 + budget.max_fix_iters`` chiamate (7 con la config di default):
+  invariata, i risultati già raccolti restano validi.
+* **Baseline B a pari budget** (``baseline-b-matched``): identica a B (prompt, log
+  grezzi, storia multi-turn, verifier) ma continua finché passa o finché esaurisce
+  lo stesso :class:`~mxagent.llm.chat.Budget` del sistema completo
+  (``max_llm_calls``, ``max_tokens``, ``max_wall_s``): ``max_fix_iters`` è
+  ``budget.max_llm_calls - 1``, cioè al più ``max_llm_calls`` chiamate. Risponde
+  alla domanda "il framework vince solo perché prova più volte?".
+
+Storia multi-turn: quando il prompt stimato supera ``num_ctx - num_predict``,
+:func:`_fit_history` toglie le coppie (risposta, feedback) più vecchie; il messaggio
+di sistema e il primo messaggio utente (specifica e interfaccia) restano sempre,
+così come l'ultimo feedback. È la condizione reale della baseline con molti turni:
+quante coppie sono state tolte e in quante chiamate finisce in ``metrics.json``,
+``result.json`` e negli eventi ``history_truncated`` del trace.
 
 Nessuna conoscenza di dominio (scheda dei formati, regole Chisel 6, RAG,
 decomposizione) entra nelle baseline: è ciò che il sistema completo aggiunge.
@@ -28,10 +43,10 @@ from . import best as _best
 from .cleanup import clean_run
 from .recorder import Recorder, new_run_id
 from .result import (RunInterrupted, check_models, first_error, interruptible, llm_by_role,
-                     llm_result_fields, write_result)
+                     llm_calls_to_pass, llm_result_fields, write_result)
 
 VerifyFn = Callable[[dict[str, str], str], VerifyReport]
-MODES = ("baseline-a", "baseline-b")
+MODES = ("baseline-a", "baseline-b", "baseline-b-matched")
 
 
 @dataclass
@@ -55,6 +70,10 @@ def settings_for(mode: str, cfg: Config) -> LoopSettings:
         return LoopSettings(max_fix_iters=0)
     if mode == "baseline-b":
         return LoopSettings(max_fix_iters=cfg.budget.max_fix_iters, feedback="raw")
+    if mode == "baseline-b-matched":
+        # stesso tetto di chiamate del sistema completo: la prima generazione + correzioni;
+        # token e tempo li ferma il Budget, condiviso con il flusso completo
+        return LoopSettings(max_fix_iters=max(0, cfg.budget.max_llm_calls - 1), feedback="raw")
     raise ValueError(f"modalità sconosciuta: {mode} (note: {MODES})")
 
 
@@ -64,7 +83,11 @@ def _est_tokens(messages: list[dict[str, str]]) -> int:
 
 def _fit_history(messages: list[dict[str, str]], num_ctx: int, reserve: int) -> int:
     """Rimuove le coppie (assistant, user) più vecchie dopo il primo messaggio
-    utente finché la storia sta in ``num_ctx - reserve``. Restituisce quante ne ha tolte."""
+    utente finché la storia sta in ``num_ctx - reserve``. Restituisce quante ne ha tolte.
+
+    Restano sempre il messaggio di sistema, il primo messaggio utente e l'ultima
+    coppia (risposta precedente + ultimo feedback): se nemmeno quelli stanno nel
+    contesto la chiamata parte comunque e il troncamento lo fa il backend."""
     dropped = 0
     while _est_tokens(messages) > num_ctx - reserve and len(messages) > 4:
         del messages[2:4]
@@ -119,7 +142,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
     best: tuple[VerifyReport, dict[str, str]] | None = None
     stop, cands_to_pass, time_to_pass = "max_iters", None, None
     rounds = 0  # cicli di correzione: chiamate dopo la prima, ognuna col feedback della precedente
-    no_code = repeated = truncations = 0
+    no_code = repeated = truncations = truncated_calls = 0
     prev_keys: list[str] | None = None
     outcome: dict = {"status": "failed", "reason": "run non terminata"}
     cands: list[_best.Candidate] = []  # ogni candidato verificato, per best/
@@ -147,6 +170,10 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "tokens_in": bud["prompt_tokens"], "tokens_out": bud["completion_tokens"],
                 "llm_by_role": llm_by_role(rec.events), **llm_result_fields(llm, bud),
                 "solution": (best_info or {}).get("solution", "none"), "best": best_info,
+                "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
+                else None,
+                "history_truncations": truncations, "history_truncated_calls": truncated_calls,
+                "max_fix_iters": st.max_fix_iters,
                 "duplicates": 0, "ppa": None})
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale
             rec.event("result_error", error=f"{type(e).__name__}: {e}")
@@ -156,7 +183,13 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             try:
                 for it in range(st.max_fix_iters + 1):
                     rounds = it
-                    truncations += _fit_history(messages, role.num_ctx, role.num_predict)
+                    dropped = _fit_history(messages, role.num_ctx, role.num_predict)
+                    if dropped:
+                        truncations += dropped
+                        truncated_calls += 1
+                        rec.event("history_truncated", iter=it, dropped_pairs=dropped,
+                                  total_dropped=truncations, kept_messages=len(messages),
+                                  est_tokens=_est_tokens(messages), num_ctx=role.num_ctx)
                     r = llm.chat(messages, model=role.model, temperature=role.temperature,
                                  num_ctx=role.num_ctx, num_predict=role.num_predict,
                                  seed=seed + it, tag=f"{mode}:{it}")
@@ -219,6 +252,9 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
                 "solution": best_info.get("solution"), "best": best_info,
                 "stages": [r.stage for r in reports],
                 "no_code": no_code, "repeated_errors": repeated, "history_truncations": truncations,
+                "history_truncated_calls": truncated_calls, "max_fix_iters": st.max_fix_iters,
+                "llm_calls_to_pass": llm_calls_to_pass(rec.events, task.top) if stop == "pass"
+                else None,
                 "llm": budget.to_dict(),
             }
             rec.write_json("metrics.json", metrics)
