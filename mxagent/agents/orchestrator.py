@@ -36,7 +36,6 @@ from ..run.result import (RunInterrupted, check_models, first_error, interruptib
                           llm_result_fields, ppa_attempts, write_result)
 from ..synth import yosys as _yosys
 from ..synth.ppa import PPAReport, synthesize
-from ..util.shell import run as _run
 from ..verify import chisel
 from ..util import procs
 from ..verify.infra import infra_outcome
@@ -98,7 +97,7 @@ class Orchestrator:
         return Verifier(task, self.rec.root / "verify" / name, sbt_mode=s.sbt_mode,
                         random_vectors=s.random_vectors, seed=s.seed, max_examples=s.max_examples,
                         sim_timeout=s.timeout_s, ddmin_rounds=s.ddmin_rounds,
-                        sbt_workspace=self.sbt_ws)
+                        sbt_workspace=self.sbt_ws, jvm_cpus=s.jvm_cpus)
 
     def _state(self, name: str, **data) -> None:
         self.states.append(name)
@@ -483,7 +482,8 @@ class Orchestrator:
                            stage=self.states[-1] if self.states else None)
         finally:
             if self.cfg.sim.sbt_mode == "client" and self.sbt_ws.is_dir():
-                _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
+                alive = bool(procs.java_under(self.sbt_ws)) if procs.supported() else None
+                chisel.shutdown_server(self.sbt_ws, self.cfg.sim.jvm_cpus, alive=alive)
 
         passed = bool(final and final.passed)
         if passed:

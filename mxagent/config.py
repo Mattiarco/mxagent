@@ -135,6 +135,9 @@ class BudgetConfig(_Strict):
 class SimConfig(_Strict):
     simulator: str = "verilator"
     sbt_mode: str = "client"  # client = server sbt persistente (~1 s a caldo), batch = a freddo
+    #: CPU viste da ogni JVM di sbt (-XX:ActiveProcessorCount): fissa i thread del GC, del
+    #: JIT e dei pool di sbt invece di dimensionarli su tutti i core (0/null = nessun limite)
+    jvm_cpus: int | None = 4
     max_examples: int = 3  # vettori minimi riportati nel feedback
     ddmin_rounds: int = 8
     random_vectors: int = 2000

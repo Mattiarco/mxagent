@@ -123,7 +123,7 @@ def test_elaboration_log_with_system_error_is_infra_not_compile(tmp_path, monkey
            "memory or process/resource limits reached")
     calls = []
 
-    def fake_elab(work, pkg, top, out_dir, mode="batch", timeout=900):
+    def fake_elab(work, pkg, top, out_dir, mode="batch", timeout=900, **kw):
         calls.append(1)
         return ElabResult(False, [SourceError("elaboration", "OutOfMemoryError: unable to create "
                                               "native thread")], [], 1.0, log)
@@ -266,7 +266,7 @@ def test_verification_that_times_out_leaves_no_children(tmp_path, monkeypatch):
     pidf = tmp_path / "pid"
     monkeypatch.setattr(chisel, "sbt_cmd", lambda mode, c: [sys.executable, "-c", CHILD,
                                                              str(pidf), "hang"])
-    monkeypatch.setattr(chisel.elaborate, "__defaults__", ("batch", 3))
+    monkeypatch.setattr(chisel.elaborate, "__defaults__", ("batch", 3, chisel.DEFAULT_JVM_CPUS))
     v = Verifier(TASK, tmp_path / "v", sbt_mode="batch", infra_backoff=())
     rep = v.verify({"E2M1Decode.scala": "import chisel3._\nclass E2M1Decode extends RawModule {}"},
                    "c00")

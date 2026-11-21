@@ -231,6 +231,43 @@ def _finish(errs: list[SourceError], src_dir: Path | None) -> list[SourceError]:
 
 
 # --------------------------------------------------------------- esecuzione
+#: CPU che vede ogni JVM di sbt (``-XX:ActiveProcessorCount``; ``sim.jvm_cpus``). La JVM
+#: dimensiona su questo numero i thread del GC, dei compilatori JIT, del ForkJoinPool e
+#: dei pool di sbt/zinc/Scala: con tutti i core di una macchina grande (20 sul DGX Spark)
+#: un server sbt per run tiene un centinaio di thread. Il Verilog prodotto non cambia.
+DEFAULT_JVM_CPUS = 4
+
+
+def sbt_env(jvm_cpus: int | None = DEFAULT_JVM_CPUS) -> dict[str, str]:
+    """Ambiente dei comandi sbt: ``SBT_OPTS`` (default ``-Xss8m``, Chisel ricorre in
+    profondità) più ``-XX:ActiveProcessorCount`` se non già presente. Vale per il
+    server di ``--client`` (avviato dal primo comando del workspace) e per ``-batch``."""
+    opts = os.environ.get("SBT_OPTS", "-Xss8m")
+    if jvm_cpus and "ActiveProcessorCount" not in opts:
+        opts = f"{opts} -XX:ActiveProcessorCount={int(jvm_cpus)}".strip()
+    return {"SBT_OPTS": opts, "NO_COLOR": "1"}
+
+
+def active_file(work: Path) -> Path:
+    """Scritto dal server sbt di ``work`` all'avvio, cancellato allo shutdown."""
+    return Path(work) / "project" / "target" / "active.json"
+
+
+def shutdown_server(work: Path, jvm_cpus: int | None = DEFAULT_JVM_CPUS, alive: bool | None = None,
+                    timeout: float = 60) -> Result | None:
+    """``sbt --client shutdown`` solo se un server c'è: senza server il client ne
+    avvierebbe uno nuovo solo per spegnerlo. ``alive`` (JVM vive nel workspace, se
+    note) ha la precedenza su ``active.json``, che resta se il server muore di colpo:
+    in quel caso il file viene tolto, così il comando successivo parte pulito."""
+    act = active_file(work)
+    if alive is None:
+        alive = act.is_file()
+    if not alive:
+        act.unlink(missing_ok=True)
+        return None
+    return run(sbt_cmd("client", "shutdown"), cwd=work, timeout=timeout, env=sbt_env(jvm_cpus))
+
+
 def sbt_cmd(mode: str, command: str) -> list[str]:
     if mode == "client":
         return ["sbt", "--client", command]
@@ -238,7 +275,7 @@ def sbt_cmd(mode: str, command: str) -> list[str]:
 
 
 def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch",
-              timeout: float = 900) -> ElabResult:
+              timeout: float = 900, jvm_cpus: int | None = DEFAULT_JVM_CPUS) -> ElabResult:
     """Compila ed elabora ``<pkg>.<top>``; emette SystemVerilog in ``out_dir``."""
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -248,8 +285,7 @@ def elaborate(work: Path, pkg: str, top: str, out_dir: Path, mode: str = "batch"
     # client: il server sbt (JVM persistente) deve sopravvivere al comando; lo chiude
     # Verifier.close. batch: a fine comando nessun processo del gruppo resta vivo.
     r: Result = run(sbt_cmd(mode, cmd), cwd=work, timeout=timeout,
-                    env={"SBT_OPTS": os.environ.get("SBT_OPTS", "-Xss8m"), "NO_COLOR": "1"},
-                    keep_group=mode == "client")
+                    env=sbt_env(jvm_cpus), keep_group=mode == "client")
     log = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.log)
     src_dir = work / "src" / "main" / "scala" / pkg
     verilog = sorted([*out_dir.rglob("*.sv"), *out_dir.rglob("*.v")])

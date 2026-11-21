@@ -209,13 +209,28 @@ La campagna principale ha 910 job:
   SIGTERM e poi SIGKILL (salvo il server di `sbt --client`, chiuso a fine run). A
   fine run e a fine job vengono terminate le JVM con la directory di lavoro nella
   cartella della run (`jvm_killed` nel trace e in `index.jsonl`).
+- **Thread delle JVM di sbt:** ogni run ha il proprio server `sbt --client` (una JVM
+  per run). Senza limiti la JVM dimensiona thread del GC, compilatori JIT,
+  ForkJoinPool e pool di sbt/zinc/Scala su tutti i core (20 sul DGX Spark).
+  `sim.jvm_cpus` (default 4) passa `-XX:ActiveProcessorCount` alle JVM di sbt
+  (server, client JVM, `-batch`) tramite `SBT_OPTS`, insieme a `-Xss8m`. Un
+  `SBT_OPTS` dell'utente che contiene già `ActiveProcessorCount` vince. Il Verilog
+  prodotto non cambia: cambia solo quanti thread tiene ogni JVM. `sbt --client
+  shutdown` parte solo se il server esiste (altrimenti il client ne avvierebbe uno
+  per spegnerlo); un `active.json` rimasto da un server morto viene tolto.
 - **Controllo delle risorse:** `mxagent eval` controlla prima di partire il limite
   sui task (minimo fra `ulimit -u` e `pids.max` del cgroup) rispetto a parallel x
-  picco stimato per job (2·cpu+60 thread del server sbt, cpu+30 del client,
-  firtool, cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux, sintesi), e la
-  presenza di JVM di sbt orfane; se non basta si ferma con il motivo (`--force` per
-  partire comunque). Diagnosi: `scripts/check_resources.sh` oppure `mxagent doctor
-  --resources --parallel N [--kill-orphans]`. Il dry-run mostra parallel e la stima.
+  picco stimato per job (2·c+60 thread del server sbt e c+30 del client, con c =
+  `sim.jvm_cpus`; firtool; cpu+10 di Verilator/g++) + 1024 riservati (Ollama, tmux,
+  sintesi), e la presenza di JVM di sbt orfane; se non basta si ferma con il motivo
+  (`--force` per partire comunque). Diagnosi: `scripts/check_resources.sh` (limiti,
+  thread per comando, ruolo, thread, CPU viste e mappe di ogni JVM, overcommit e
+  `vm.max_map_count`, perché `pthread_create` dà EAGAIN anche quando non riesce a
+  mappare lo stack) oppure `mxagent doctor --resources --parallel N
+  [--kill-orphans]`. Il dry-run mostra parallel, `sim.jvm_cpus` e la stima. Misura
+  durante una prova: `scripts/watch_resources.sh OUT.tsv 5 PID...` (task
+  dell'utente, JVM con ruolo e thread, firtool, Verilator, g++, Yosys, Ollama,
+  memoria ogni 5 s).
 - **Sintesi:** ogni design passato, di qualunque modalità, viene sintetizzato
   con `ppa_backends` (default `generic`) in `runs/<job>/eval_synth/`. Il
   riferimento di ogni task viene sintetizzato una volta, in `reference/<task>/`.

@@ -133,7 +133,7 @@ def run_loop(task: Task, cfg: Config, mode: str, *, seed: int, role: ModelRole,
             verifier = Verifier(task, rec.root / "verify", sbt_mode=cfg.sim.sbt_mode,
                                 random_vectors=cfg.sim.random_vectors, seed=cfg.sim.seed,
                                 max_examples=cfg.sim.max_examples, sim_timeout=cfg.sim.timeout_s,
-                                ddmin_rounds=cfg.sim.ddmin_rounds)
+                                ddmin_rounds=cfg.sim.ddmin_rounds, jvm_cpus=cfg.sim.jvm_cpus)
             own_verifier = True
         verify_fn = verifier.verify
 

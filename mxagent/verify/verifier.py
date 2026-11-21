@@ -75,12 +75,14 @@ class Verifier:
                  random_vectors: int = 2000, seed: int = 0, max_examples: int = 3,
                  sim_timeout: float = 900, ddmin_rounds: int = 8, max_vectors: int = 200_000,
                  sbt_workspace: Path | None = None,
-                 infra_backoff: tuple[float, ...] = (10, 30, 60)):
+                 infra_backoff: tuple[float, ...] = (10, 30, 60),
+                 jvm_cpus: int | None = chisel.DEFAULT_JVM_CPUS):
         self.task = task
         self.work = Path(work_dir)
         # workspace sbt condivisibile fra più Verifier della stessa run (un solo server JVM)
         self.sbt_ws = Path(sbt_workspace) if sbt_workspace else self.work / "sbt"
         self.sbt_mode = sbt_mode
+        self.jvm_cpus = jvm_cpus  # -XX:ActiveProcessorCount delle JVM di sbt
         self.seed = seed
         self.n_random = random_vectors
         self.max_examples = max_examples
@@ -166,8 +168,8 @@ class Verifier:
         """Dopo un errore di sistema o a fine run: server sbt del workspace (shutdown,
         poi SIGTERM/SIGKILL alle JVM con cwd nel workspace)."""
         if self.sbt_mode == "client" and self.sbt_ws.is_dir():
-            from ..util.shell import run as _run
-            _run(chisel.sbt_cmd("client", "shutdown"), cwd=self.sbt_ws, timeout=60)
+            alive = bool(procs.java_under(self.sbt_ws)) if procs.supported() else None
+            chisel.shutdown_server(self.sbt_ws, self.jvm_cpus, alive=alive)
         return procs.kill_pids([p.pid for p in procs.java_under(self.sbt_ws)])
 
     def _verify_once(self, sources: dict[str, str], tag: str) -> VerifyReport:
@@ -181,7 +183,8 @@ class Verifier:
         # 1. compilazione + elaborazione
         ws = chisel.prepare_workspace(self.sbt_ws)
         chisel.write_sources(ws, pkg, sources)
-        el = chisel.elaborate(ws, pkg, self.task.top, job / "verilog", mode=self.sbt_mode)
+        el = chisel.elaborate(ws, pkg, self.task.top, job / "verilog", mode=self.sbt_mode,
+                              jvm_cpus=self.jvm_cpus)
         (job / "elaborate.log").write_text(el.log, encoding="utf-8")
         rep.compile, rep.seconds["compile"] = el.to_dict(), round(el.seconds, 2)
         if not el.ok:
