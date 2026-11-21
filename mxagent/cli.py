@@ -451,7 +451,7 @@ def cmd_eval(a: argparse.Namespace) -> int:
     from .util.shell import kill_active
     with interruptible():  # SIGTERM/SIGHUP come Ctrl-C: i job in corso vengono terminati
         try:
-            r.run(parallel=a.parallel, retry_errors=a.retry_errors, limit=a.limit)
+            r.run(retry_errors=a.retry_errors, limit=a.limit)
         except BaseException:
             kill_active(grace=120)  # i job sono in sessioni proprie: non ricevono il segnale
             raise

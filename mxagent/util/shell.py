@@ -24,7 +24,7 @@ from typing import Callable
 
 from .procs import group_alive, kill_group
 
-#: process group dei comandi in corso (anche da thread diversi: campagna con --parallel)
+#: process group dei comandi in corso: kill_active li termina se il processo viene interrotto
 _ACTIVE: set[int] = set()
 _LOCK = threading.Lock()
 
