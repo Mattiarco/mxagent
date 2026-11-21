@@ -84,6 +84,7 @@ synth:
   clock_ns: 10.0
   pnr_seeds: [1, 2, 3]
   timeout_s: 1800
+  best_timeout_s: 600   # sintesi dei pari merito di best/ dopo la run: tempo totale
   objective: adp        # area | delay | adp
   optimize_iters: 4
   min_gain: 0.01

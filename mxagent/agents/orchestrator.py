@@ -92,6 +92,10 @@ class Orchestrator:
         self._final_rep = None  # verifica rieseguita del design finale (run superate)
         self._best_info: dict | None = None
         self._t_end: float | None = None  # fine del lavoro della run (prima di best/)
+        #: fase finale (scelta e sintesi di best/): "run" prima, "best" durante, "done" dopo;
+        #: un errore o un segnale in quella fase va in final_phase_error, l'esito resta
+        self._final_phase = "run"
+        self._final_phase_error: str | None = None
 
     # ------------------------------------------------------------ servizi
     def _make_verifier(self, task: Task, name: str) -> Verifier:
@@ -334,12 +338,24 @@ class Orchestrator:
 
     def _best_safe(self, passed: bool, synth: bool = True) -> dict:
         """``best/``: miglior candidato (criterio in mxagent/run/best.py). Non deve mai far
-        fallire la run: un errore è registrato e il campo resta ``none``."""
+        fallire la run: un errore è registrato in ``final_phase_error`` e il campo resta
+        ``none``. Un segnale durante la sintesi dei pari merito la interrompe: best/ viene
+        scelto senza sintesi e la run finisce con il suo esito (già noto)."""
+        self._final_phase = "best"
         try:
             self._best_info = self._select_best(passed, synth)
+        except RunInterrupted as e:
+            self._final_phase_error = f"interrupted: {e.signame} durante la sintesi di best/"
+            self.rec.event("best_error", error=self._final_phase_error)
+            try:
+                self._best_info = self._select_best(passed, False)
+            except Exception as e2:  # noqa: BLE001
+                self._best_info = {"solution": "none", "error": f"{type(e2).__name__}: {e2}"[:300]}
         except Exception as e:  # noqa: BLE001
+            self._final_phase_error = f"{type(e).__name__}: {e}"[:300]
             self.rec.event("best_error", error=f"{type(e).__name__}: {e}")
             self._best_info = {"solution": "none", "error": f"{type(e).__name__}: {e}"[:300]}
+        self._final_phase = "done"
         self.rec.event("best", **{k: v for k, v in self._best_info.items()
                                   if k in ("solution", "tag", "iteration", "tests_passed",
                                            "tests_total", "stage")})
@@ -360,12 +376,14 @@ class Orchestrator:
                                  origin=a.origin)
                  for kind, res in self._top_solves for a in res.attempts if a.report is not None]
 
+        deadline = _best.deadline_for(s)  # synth.best_timeout_s in tutto
+
         def synth_fn(verilog: list[str], tag: str) -> dict | None:
-            rep = self._synth(verilog, self.task, s, self.rec.root / "best_synth" / tag,
-                              backends=[s.primary])
+            rep = self._synth(verilog, self.task, _best.capped(s, deadline),
+                              self.rec.root / "best_synth" / tag, backends=[s.primary])
             return rep.summary().get(s.primary)
 
-        b = _best.select_best(cands, synth_fn if synth and s.backends else None)
+        b = _best.select_best(cands, synth_fn if synth and s.backends else None, deadline=deadline)
         return _best.write_best(self.rec.root, b, "complete" if b and b.report.passed else
                                 "partial", s.primary, ranking=cands)
 
@@ -509,6 +527,10 @@ class Orchestrator:
         b = best.report if best else None
         c = self.ctx.counters
         self._t_end = time.monotonic()  # best/ (sintesi dei pari merito) non conta nei tempi
+        # result.json provvisorio (final_phase "best"): l'esito è noto e resta su disco
+        # anche se la sintesi di best/ viene uccisa (SIGKILL, macchina riavviata)
+        self._final_phase = "best"
+        self._write_result(t0)
         best_info = self._best_safe(passed)
         metrics = {
             "task": self.task.name, "mode": self.mode, "model": coder, "seed": self.seed,
@@ -531,6 +553,7 @@ class Orchestrator:
             **llm_cache_fields(self.rec.events, expected_cache_origins(self.rec.root)),
             "ppa": _ppa_metrics(ppa_out, self.cfg.synth.primary, self.task.timing.target_mhz),
             "wrapper": wrap_out,
+            "final_phase_error": self._final_phase_error,
         }
         self.rec.write_json("metrics.json", metrics)
         return RunResult(self.rec.root, metrics, b, [a.report for a in (final.attempts if final else [])
@@ -575,6 +598,8 @@ class Orchestrator:
                     "final": out.get("final"), "error": out.get("error")},
                 "final_dir": "final" if self._finalized else None,
                 "states": self.states,
+                "final_phase": self._final_phase,
+                "final_phase_error": self._final_phase_error,
             }
             write_result(self.rec, result)
         except Exception as e:  # noqa: BLE001 - non deve mascherare l'errore originale

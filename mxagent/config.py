@@ -161,6 +161,9 @@ class SynthConfig(_Strict):
     clock_ns: float = Field(10.0, gt=0)
     pnr_seeds: list[int] = [1, 2, 3]
     timeout_s: int = 1800
+    #: tempo totale per sintetizzare i pari merito di best/ dopo la run (0 = nessun limite);
+    #: ogni sintesi ha come timeout il minimo fra timeout_s e il tempo rimasto
+    best_timeout_s: int = Field(600, ge=0)
     # PPA Optimizer: obiettivo, iterazioni, soglie di accettazione
     objective: str = "adp"  # area | delay | adp (area x delay)
     optimize_iters: int = Field(4, ge=0)

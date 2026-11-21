@@ -183,6 +183,18 @@ La campagna principale ha 910 job:
   distinti dai fallimenti del modello. Il report li elenca e li esclude dai tassi.
   Se la run ha lasciato `result.json` (es. `interrupted` per SIGHUP), il suo
   stato è riportato in `result_status`.
+- **Fase finale (`best/`):** dopo l'esito (DONE/FAILED) la run sceglie il miglior
+  candidato e sintetizza i pari merito (al più 3). `result.json` viene scritto
+  subito, prima di `best/`, con `final_phase: "best"`, e riscritto alla fine con
+  `final_phase: "done"`: se la sintesi viene uccisa (SIGKILL) resta su disco con
+  l'esito. La sintesi dei pari merito ha `synth.best_timeout_s` (default 600 s) in
+  tutto: ogni sintesi ha come timeout il minimo fra `synth.timeout_s` e il tempo
+  rimasto, quelle oltre la scadenza sono `skipped: best_timeout`. Prima ogni
+  sintesi poteva durare 1800 s: 3 pari merito dopo una run da 1800 s superavano il
+  timeout del job (5400 s) e una run `failed` diventava `timeout`. Un'eccezione
+  della fase o un segnale durante la sintesi vanno in `final_phase_error`
+  (`result.json` e `metrics.json`). Un segnale ferma la sintesi, `best/` viene
+  scelto senza sintesi e l'esito resta quello della run (non `interrupted`).
 - **Errori di sistema durante la verifica** ([infra.py](../mxagent/verify/infra.py),
   unico elenco di pattern): "unable to create native thread", "Resource temporarily
   unavailable" / Errno 11 / EAGAIN, "Cannot allocate memory", `OutOfMemoryError` e
