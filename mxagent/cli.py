@@ -66,7 +66,7 @@ def cmd_doctor(a: argparse.Namespace) -> int:
         print(f"mxagent {__version__} - risorse del sistema (sim.sbt_mode = {cfg.sim.sbt_mode}, "
               f"sim.jvm_cpus = {cfg.sim.jvm_cpus})\n")
         print(procs.render_snapshot(snap))
-        errors, warns, est = procs.preflight(a.parallel, snap, jvm_cpus=cfg.sim.jvm_cpus)
+        errors, warns, est = procs.preflight(snap, jvm_cpus=cfg.sim.jvm_cpus)
         print(f"\nstima per parallel={a.parallel}: {a.parallel} x {est['per_job_tasks']} task per "
               f"job + {est['reserved_tasks']} riservati = {est['need_tasks']}")
         for w in warns:
@@ -383,7 +383,7 @@ def describe_campaign(c, r, todo: list, parallel: int = 1) -> str:
          "warm-up dei modelli a ogni cambio di profilo (fuori dal conteggio): "
          + ("sì" if c.warmup else "no")]
     snap = procs.snapshot()
-    _, _, est = procs.preflight(parallel, snap, jvm_cpus=cfg.sim.jvm_cpus)
+    _, _, est = procs.preflight(snap, jvm_cpus=cfg.sim.jvm_cpus)
     lim = est["pids_limit"]
     L += [f"parallel: {parallel} job insieme",
           f"JVM di sbt: sim.sbt_mode={cfg.sim.sbt_mode}, -XX:ActiveProcessorCount="
@@ -436,7 +436,7 @@ def cmd_eval(a: argparse.Namespace) -> int:
         print(describe_campaign(c, r, r.pending(a.retry_errors), a.parallel))
         return 0
     from .util import procs
-    errors, warns, est = procs.preflight(a.parallel, jvm_cpus=r.base_config().sim.jvm_cpus)
+    errors, warns, est = procs.preflight(jvm_cpus=r.base_config().sim.jvm_cpus)
     for w in warns:
         print(f"AVVISO risorse: {w}", file=sys.stderr)
     if errors:

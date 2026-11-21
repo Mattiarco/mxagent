@@ -344,13 +344,18 @@ def supported() -> bool:
     return os.name != "nt" and PROC.is_dir()
 
 
-def preflight(parallel: int, snap: Snapshot | None = None,
+#: memoria stimata per un job: heap di sbt server + client + Verilator (Ollama a parte)
+JOB_MEM = 4 * 2**30
+
+
+def preflight(snap: Snapshot | None = None,
               jvm_cpus: int | None = None) -> tuple[list[str], list[str], dict]:
-    """Controllo prima di una campagna: (problemi bloccanti, avvisi, stima)."""
+    """Controllo prima di una campagna o di una run: (problemi bloccanti, avvisi, stima).
+    Le run sono sempre una alla volta: la stima è per un job più la quota riservata."""
     s = snap or snapshot()
     per_job = job_peak_threads(s.ncpu, jvm_cpus=jvm_cpus)
-    need = parallel * per_job + RESERVED_TASKS
-    est = {"parallel": parallel, "per_job_tasks": per_job, "reserved_tasks": RESERVED_TASKS,
+    need = per_job + RESERVED_TASKS
+    est = {"per_job_tasks": per_job, "reserved_tasks": RESERVED_TASKS,
            "jvm_cpus": jvm_cpus,
            "need_tasks": need, "ncpu": s.ncpu, "pids_limit": s.pids_limit, "pids_used": s.pids_used}
     errors, warns = [], []
@@ -361,11 +366,12 @@ def preflight(parallel: int, snap: Snapshot | None = None,
     if lim is not None and lim - used < need:
         errors.append(
             f"limite di processi/thread troppo basso: disponibili {lim - used} task (limite {lim}, "
-            f"in uso {used}); per parallel={parallel} ne servono ~{need} "
-            f"({parallel} x {per_job} di picco per job: JVM di sbt server+client, firtool, "
-            f"Verilator/g++; più {RESERVED_TASKS} per Ollama, tmux, sintesi). Oltre il limite la "
-            "JVM fallisce con 'unable to create native thread' e fork con EAGAIN (Errno 11). "
-            "Alza `ulimit -u` / TasksMax del cgroup o riduci --parallel.")
+            f"in uso {used}); per un job ne servono ~{need} "
+            f"({per_job} di picco: JVM di sbt server+client, firtool, Verilator/g++; più "
+            f"{RESERVED_TASKS} per Ollama, tmux, sintesi). Oltre il limite la JVM fallisce con "
+            "'unable to create native thread' e fork con EAGAIN (Errno 11). Alza `ulimit -u` / "
+            "TasksMax del cgroup (es. `systemctl set-property user-$(id -u).slice "
+            "TasksMax=infinity`), termina i processi che occupano task, o riduci sim.jvm_cpus.")
     if s.orphans:
         errors.append(
             f"{len(s.orphans)} JVM di sbt orfane (lanciate da run non più attive): "
@@ -376,11 +382,10 @@ def preflight(parallel: int, snap: Snapshot | None = None,
         warns.append(f"ulimit -n = {s.nofile_soft}: una JVM di sbt apre centinaia di jar; "
                      "consigliato >= 4096")
     if s.mem_available is not None:
-        need_mem = parallel * 4 * 2**30  # ~4 GiB per job: heap di sbt server + client + Verilator
-        if s.mem_available < need_mem:
+        if s.mem_available < JOB_MEM:
             warns.append(f"memoria disponibile {s.mem_available / 2**30:.1f} GiB < "
-                         f"{need_mem / 2**30:.0f} GiB stimati per parallel={parallel} "
-                         "(~4 GiB per job; Ollama tiene il modello in memoria a parte)")
+                         f"{JOB_MEM / 2**30:.0f} GiB stimati per un job "
+                         "(Ollama tiene il modello in memoria a parte)")
     return errors, warns, est
 
 
