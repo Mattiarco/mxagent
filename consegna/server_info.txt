@@ -83,3 +83,5 @@ Sat Nov 21 23:20:59 2026
 +-----------------------------------------------------------------------------------------+
 ollama version is 0.35.0
 7409ef8489aba87ccdf2f6bae2264be3f1103f2e
+Verilator 5.055 devel rev v5.054-94-g4d23f6ea0 (mod)
+Yosys 0.70+360 (git sha1 5e740962d, Release, GNU /usr/bin/aarch64-linux-gnu-g++ 15.2.0)
