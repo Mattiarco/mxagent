@@ -32,6 +32,5 @@ for s in $(seq "$S0" "$S1"); do
     "$PY" scripts/compare_backends.py --tasks "$t" --seed-start "$s" --n 1 --out "$OUT" "$@" 2>&1 | tee -a "$log"
   done
 done
-"$PY" scripts/compare_backends.py --tasks "$KERNELS" --seed-start "$SEED0" --n $(( S1 - SEED0 + 1 )) \
-  --out "$OUT" "$@" 2>&1 | tee -a "$log"
+"$PY" scripts/compare_backends.py --out "$OUT" --report-only 2>&1 | tee -a "$log"
 echo "== $(date '+%F %T') lotto $S0-$S1 finito in $(( ($(date +%s) - start) / 60 )) min" | tee -a "$log"
